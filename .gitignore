@@ -2,15 +2,28 @@
 .gradle/
 build/
 **/build/
+*/out/
+**/.kotlin/
 
 # Local properties
 local.properties
+secret.properties
+*.jks
+*.keystore
+**/release/
 
 # IDE
 .idea/
 *.iml
 *.iws
 *.ipr
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Generated outputs
+app/build/outputs/
 
 # OS and editor
 .DS_Store

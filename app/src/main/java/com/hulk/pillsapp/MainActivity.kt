@@ -13,7 +13,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 
 class MainActivity : ComponentActivity() {
@@ -32,19 +32,22 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun AppHome() {
-    val context = LocalContext.current
-    val appName = context.getString(R.string.app_name)
+    val appName = stringResource(R.string.app_name)
+    val appNameLabel = stringResource(R.string.app_name_label)
+    val versionLabel = stringResource(R.string.version_name_label)
+    val buildTimeLabel = stringResource(R.string.build_time_label)
+    val statusLabel = stringResource(R.string.app_running_label)
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
         verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.Start
+        horizontalAlignment = Alignment.Start,
     ) {
-        Text(text = "应用名称：$appName")
-        Text(text = "versionName：${BuildConfig.VERSION_NAME}")
-        Text(text = "构建时间：${BuildConfig.BUILD_TIME}")
-        Text(text = "工程运行正常")
+        Text(text = "${appNameLabel}：$appName")
+        Text(text = "$versionLabel：${BuildConfig.VERSION_NAME}")
+        Text(text = "$buildTimeLabel：${BuildConfig.BUILD_TIME}")
+        Text(text = statusLabel)
     }
 }

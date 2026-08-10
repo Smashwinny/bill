@@ -1,6 +1,15 @@
+import java.time.Instant
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+val buildTimeValue: String = (findProperty("BUILD_TIME") as String?)
+    ?: Instant.now().toString()
+
+configurations.configureEach {
+    exclude(group = "androidx.profileinstaller", module = "profileinstaller")
 }
 
 android {
@@ -13,11 +22,12 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(
             "String",
             "BUILD_TIME",
-            '"' + java.time.Instant.now().toString() + '"'
+            "\"$buildTimeValue\""
         )
     }
 
@@ -39,13 +49,9 @@ android {
         jvmTarget = "17"
     }
 
-    defaultConfig {
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-    }
-
     lint {
         checkReleaseBuilds = false
-        abortOnError = false
+        abortOnError = true
     }
 }
 
