@@ -4,4 +4,14 @@
     <string name="version_name_label">versionName</string>
     <string name="build_time_label">构建时间</string>
     <string name="app_running_label">工程运行正常</string>
+    <string name="notification_listener_service_name">通知监听服务</string>
+    <string name="notification_permission_label">通知读取权限</string>
+    <string name="notification_permission_status_format">状态：%1$s</string>
+    <string name="notification_service_label">监听服务状态</string>
+    <string name="notification_service_connection_format">状态：%1$s</string>
+    <string name="notification_last_connected_label">最近连接时间</string>
+    <string name="notification_last_disconnected_label">最近断开时间</string>
+    <string name="notification_last_connected_time_format">%1$s</string>
+    <string name="notification_last_disconnected_time_format">%1$s</string>
+    <string name="go_to_access_settings_label">前往系统通知读取授权页</string>
 </resources>
