@@ -28,7 +28,7 @@ class NotificationListenerStateTest {
 
     @Test
     fun manifestShouldDeclareNotificationListenerServiceAndAction() {
-        val manifestPath = Paths.get("app/src/main/AndroidManifest.xml")
+        val manifestPath = Paths.get("src/main/AndroidManifest.xml")
         val manifest = String(Files.readAllBytes(manifestPath))
 
         assertNotNull(manifest)
