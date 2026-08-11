@@ -15,6 +15,13 @@ data class NotificationEvent(
     val contentHash: String,
 )
 
+private val androidPackageNamePattern = Regex(
+    "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$"
+)
+
+fun isValidAndroidPackageName(value: String): Boolean =
+    androidPackageNamePattern.matches(value.trim())
+
 fun createNotificationEventFromStatusBarNotification(
     statusBarNotification: StatusBarNotification,
 ): NotificationEvent {

@@ -79,6 +79,24 @@ class NotificationEventStorageTest {
     }
 
     @Test
+    fun packageNameValidationRejectsAmbiguousValues() {
+        assertTrue(isValidAndroidPackageName("com.example.bank"))
+        assertFalse(isValidAndroidPackageName("com..bank"))
+        assertFalse(isValidAndroidPackageName("not-a-package"))
+        assertFalse(isValidAndroidPackageName(""))
+    }
+
+    @Test
+    fun productionSqliteStoreDeclaresIdempotentInsertContract() {
+        val repositoryPath = Paths.get(
+            "src/main/java/com/hulk/pillsapp/NotificationEventRepository.kt"
+        )
+        val source = String(Files.readAllBytes(repositoryPath))
+        assertTrue(source.contains("notification_key TEXT PRIMARY KEY"))
+        assertTrue(source.contains("SQLiteDatabase.CONFLICT_IGNORE"))
+    }
+
+    @Test
     fun manifestShouldNotDeclareInternetOrStorageOrSmsPermissions() {
         val manifestPath = Paths.get("src/main/AndroidManifest.xml")
         val manifest = String(Files.readAllBytes(manifestPath))

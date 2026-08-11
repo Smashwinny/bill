@@ -17,8 +17,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -124,6 +124,7 @@ private fun AppHome(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.Start,
@@ -162,12 +163,17 @@ private fun AppHome(
             value = packageInput,
             onValueChange = {
                 packageInput = it
-                packageInputError = null
-                packageHint = validatePackageFormat(context, it)
+                val trimmed = it.trim()
+                packageInputError = if (trimmed.isNotEmpty() && !isValidAndroidPackageName(trimmed)) {
+                    context.getString(R.string.package_name_format_error)
+                } else {
+                    null
+                }
+                packageHint = if (packageInputError == null) packageAvailabilityHint(context, trimmed) else null
             },
             modifier = Modifier.fillMaxWidth(),
             label = { Text(packageLabel) },
-            isError = packageInputError != null || packageHint != null,
+            isError = packageInputError != null,
             supportingText = {
                 val tip = packageInputError ?: packageHint
                 if (tip != null) {
@@ -179,10 +185,12 @@ private fun AppHome(
         Button(
             onClick = {
                 val trimmed = packageInput.trim()
-                val canAdd = trimmed.isNotBlank() && packageHint == null
+                val canAdd = trimmed.isNotBlank() && isValidAndroidPackageName(trimmed)
                 if (!canAdd) {
-                    packageInputError = packageInput.trim().ifBlank {
+                    packageInputError = if (trimmed.isBlank()) {
                         context.getString(R.string.package_name_required_error)
+                    } else {
+                        context.getString(R.string.package_name_format_error)
                     }
                     return@Button
                 }
@@ -200,12 +208,11 @@ private fun AppHome(
         if (enabledPackages.isEmpty()) {
             Text(text = stringResource(R.string.no_enabled_packages))
         } else {
-            LazyColumn(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(160.dp)
             ) {
-                items(enabledPackages) { packageName ->
+                enabledPackages.forEach { packageName ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -232,12 +239,11 @@ private fun AppHome(
         if (events.isEmpty()) {
             Text(text = noEventsHint)
         } else {
-            LazyColumn(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(260.dp)
             ) {
-                items(events) { event ->
+                events.forEach { event ->
                     Card(
                         colors = CardDefaults.cardColors(),
                         modifier = Modifier
@@ -297,20 +303,12 @@ private fun formatEventTime(timestampMs: Long?, zoneId: ZoneId = ZoneId.systemDe
     } ?: "未发生"
 }
 
-private fun validatePackageFormat(context: Context, value: String): String? {
+private fun packageAvailabilityHint(context: Context, value: String): String? {
     val pkg = value.trim()
-    if (pkg.isBlank()) return null
-    val regex = Regex("^[a-zA-Z][a-zA-Z0-9_\\-\\.]*[a-zA-Z0-9_\\-]\$")
-    if (!regex.matches(pkg)) {
-        return context.getString(R.string.package_name_format_error)
-    }
+    if (pkg.isBlank() || !isValidAndroidPackageName(pkg)) return null
     return try {
         context.packageManager.getPackageInfo(pkg, 0)
-        if (pkg.contains("..")) {
-            context.getString(R.string.package_name_format_error)
-        } else {
-            null
-        }
+        null
     } catch (_: PackageManager.NameNotFoundException) {
         context.getString(R.string.package_not_found_warning)
     }
