@@ -14,4 +14,21 @@
     <string name="notification_last_connected_time_format">%1$s</string>
     <string name="notification_last_disconnected_time_format">%1$s</string>
     <string name="go_to_access_settings_label">前往系统通知读取授权页</string>
+    <string name="enabled_packages_title">仅采集以下已启用包名</string>
+    <string name="package_name_label">包名</string>
+    <string name="package_name_required_error">请输入包名</string>
+    <string name="package_name_format_error">包名格式不合法</string>
+    <string name="package_not_found_warning">未检测到该包名应用，仍可暂存为手动白名单</string>
+    <string name="add_package_label">添加包名</string>
+    <string name="remove_package_label">移除</string>
+    <string name="notification_events_title">原始通知事件</string>
+    <string name="no_events">暂无事件</string>
+    <string name="clear_test_data_label">清空测试数据</string>
+    <string name="clear_data_confirm_title">确认清空测试数据</string>
+    <string name="clear_data_confirm_message">将删除本机历史原始通知事件，且不可恢复。是否继续？</string>
+    <string name="confirm">确认</string>
+    <string name="cancel">取消</string>
+    <string name="no_enabled_packages">当前未配置包名，先手动添加包名后采集才会生效</string>
+    <string name="t03_privacy_notice">说明：原始通知内容仅保存在本机，不上传、不联网、不同步。</string>
+    <string name="notification_events_query_hint">仅显示本机保存事件</string>
 </resources>

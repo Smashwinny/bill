@@ -36,4 +36,21 @@ class NotificationListenerStateTest {
         assertTrue(manifest.contains("android:permission=\"android.permission.BIND_NOTIFICATION_LISTENER_SERVICE\""))
         assertTrue(manifest.contains("android.service.notification.NotificationListenerService"))
     }
+
+    @Test
+    fun t03RequiresNoForbiddenPermissionsInManifest() {
+        val manifestPath = Paths.get("src/main/AndroidManifest.xml")
+        val manifest = String(Files.readAllBytes(manifestPath))
+
+        assertTrue(manifest.contains("android:permission=\"android.permission.BIND_NOTIFICATION_LISTENER_SERVICE\""))
+        assertFalse(manifest.contains("android.permission.INTERNET"))
+        assertFalse(manifest.contains("android.permission.SEND_SMS"))
+        assertFalse(manifest.contains("android.permission.READ_SMS"))
+        assertFalse(manifest.contains("android.permission.READ_CONTACTS"))
+        assertFalse(manifest.contains("android.permission.WRITE_CONTACTS"))
+        assertFalse(manifest.contains("android.permission.WRITE_EXTERNAL_STORAGE"))
+        assertFalse(manifest.contains("android.permission.READ_EXTERNAL_STORAGE"))
+        assertFalse(manifest.contains("android.permission.SYSTEM_ALERT_WINDOW"))
+        assertFalse(manifest.contains("android.permission.BIND_ACCESSIBILITY_SERVICE"))
+    }
 }
