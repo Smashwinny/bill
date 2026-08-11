@@ -30,7 +30,7 @@ class PaymentProbeSessionTest {
                 body = "¥12.30 商户A",
                 contentHash = sha256Hex("x"),
             ),
-            keyReused = false,
+            reusedNotificationKey = false,
         )
 
         val result = runtime.finish(2000L)
@@ -62,7 +62,7 @@ class PaymentProbeSessionTest {
                 body = "订单号: A001",
                 contentHash = sha256Hex("refund"),
             ),
-            keyReused = false,
+            reusedNotificationKey = false,
         )
         runtime.appendEvent(
             NotificationEvent(
@@ -74,7 +74,7 @@ class PaymentProbeSessionTest {
                 body = "订单号: A001",
                 contentHash = sha256Hex("refund"),
             ),
-            keyReused = true,
+            reusedNotificationKey = true,
         )
 
         val result = runtime.finish(1300L)
@@ -162,6 +162,7 @@ class PaymentProbeSessionTest {
             packageName = "com.example.bank",
             scenario = ProbeScenario.FOREGROUND,
             action = ProbeAction.SUCCESS_PAYMENT,
+            startedAtMs = 1000L,
         )
         assertTrue(started)
         assertNotNull(ProbeSessionRepository.activeSessionConfig.value)

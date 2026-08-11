@@ -5,7 +5,6 @@ import java.io.File
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 enum class ProbeScenario {
@@ -91,10 +90,10 @@ private fun formatMsToLocalTime(millis: Long): String = Instant.ofEpochMilli(mil
 fun analyzeProbeFields(title: String, body: String): ProbeFieldPresence {
     val text = listOf(title, body).joinToString("\u0000").lowercase()
 
-    val amountPattern = Regex("""(?<![\\w.])(¥|￥)?\s*\d+([.,]\d{1,2})?(\s*元)?""")
+    val amountPattern = Regex("""(?:[¥￥]\s*\d+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?\s*元)""")
     val merchantPattern = Regex("""(商户|门店|收款方|付款方|商家|merchant|shop|支付店|收银)""")
     val orderPattern = Regex("""(订单|单号|order|txn|交易号|trans(?:action)?\s*id)""")
-    val successOrRefundPattern = Regex("""(成功|支付成功|已支付|付款成功|交易成功|退款成功|已退款|部分退款|全额退款|reversed|reversed|refund|refund\s*success)""")
+    val successOrRefundPattern = Regex("""(支付成功|已支付|付款成功|交易成功|退款成功|已退款|部分退款|全额退款|reversed|refund(?:\s*success)?)""")
 
     return ProbeFieldPresence(
         hasAmount = amountPattern.containsMatchIn(text),
@@ -152,6 +151,7 @@ object ProbeSessionRepository {
         packageName: String,
         scenario: ProbeScenario,
         action: ProbeAction,
+        startedAtMs: Long = System.currentTimeMillis(),
     ): Boolean {
         synchronized(lock) {
             if (_activeSession.value != null) return false
@@ -162,7 +162,7 @@ object ProbeSessionRepository {
                 packageName = packageName,
                 scenario = scenario,
                 action = action,
-                startedAtMs = System.currentTimeMillis(),
+                startedAtMs = startedAtMs,
             )
             activeRuntime = ProbeSessionRuntime(config)
             _activeSession.value = config

@@ -46,8 +46,7 @@ private class NotificationEventDbHelper(
         // T03 only. keep schema stable.
     }
 
-    fun upsertWithDuplicateState(event: NotificationEvent): Pair<Boolean, Boolean> {
-        val existsBeforeInsert = exists(event.notificationKey)
+    fun insertWithDuplicateState(event: NotificationEvent): Pair<Boolean, Boolean> {
         val values = ContentValues().apply {
             put("notification_key", event.notificationKey)
             put("package_name", event.packageName)
@@ -64,21 +63,8 @@ private class NotificationEventDbHelper(
             values,
             SQLiteDatabase.CONFLICT_IGNORE
         )
-        return result != -1L to existsBeforeInsert
-    }
-
-    private fun exists(notificationKey: String): Boolean {
-        val cursor = readableDatabase.query(
-            "notification_events",
-            arrayOf("1"),
-            "notification_key = ?",
-            arrayOf(notificationKey),
-            null,
-            null,
-            null,
-            "1",
-        )
-        return cursor.use { it.moveToFirst() }
+        val inserted = result != -1L
+        return inserted to !inserted
     }
 
     fun queryAll(): List<NotificationEvent> {
@@ -179,7 +165,7 @@ object NotificationEventRepository {
             return
         }
         scope.launch {
-            val (inserted, keyReused) = getDbHelper(context).upsertWithDuplicateState(event)
+            val (inserted, keyReused) = getDbHelper(context).insertWithDuplicateState(event)
             ProbeSessionRepository.onNotificationEvent(event, keyReused)
             if (inserted) {
                 _events.emit(getDbHelper(context).queryAll())
