@@ -2,6 +2,7 @@
     <string name="app_name">自动账本</string>
     <string name="app_name_label">应用名称</string>
     <string name="version_name_label">versionName</string>
+    <string name="version_code_label">versionCode</string>
     <string name="build_time_label">构建时间</string>
     <string name="app_running_label">工程运行正常</string>
     <string name="notification_listener_service_name">通知监听服务</string>
@@ -31,4 +32,20 @@
     <string name="no_enabled_packages">当前未配置包名，先手动添加包名后采集才会生效</string>
     <string name="t03_privacy_notice">说明：原始通知内容仅保存在本机，不上传、不联网、不同步。</string>
     <string name="notification_events_query_hint">仅显示本机保存事件</string>
+    <string name="t04_probe_title">支付渠道真机可行性探针</string>
+    <string name="t04_channel_name_label">渠道名称（用户填写）</string>
+    <string name="t04_scenario_label">场景</string>
+    <string name="t04_action_label">动作</string>
+    <string name="t04_start_probe">开始测试会话</string>
+    <string name="t04_end_probe">结束会话并记录</string>
+    <string name="t04_no_permission_warning">会话将使用白名单采集，请确认目标包名已在已启用列表，或先添加后开始。</string>
+    <string name="t04_probe_report_title">探针报告</string>
+    <string name="t04_coverage_matrix_title">覆盖矩阵：共 %1$d 个会话</string>
+    <string name="t04_no_sessions">还没有完成的会话</string>
+    <string name="t04_copy_report">复制报告到剪贴板</string>
+    <string name="t04_export_report">保存到应用私有目录</string>
+    <string name="t04_saved_report_path">报告已保存：%1$s</string>
+    <string name="t04_target_package_required_permission">目标包未在白名单中时可能收不到；开始会自动加入白名单。</string>
+    <string name="t04_preset_wechat">微信（预置）</string>
+    <string name="t04_preset_alipay">支付宝（预置）</string>
 </resources>

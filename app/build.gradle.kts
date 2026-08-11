@@ -20,8 +20,8 @@ android {
         applicationId = "com.hulk.pillsapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.0.3-t03"
+        versionCode = 4
+        versionName = "1.0.4-t04"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(
