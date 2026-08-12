@@ -139,7 +139,6 @@ private fun AppHome(
 
         Spacer(modifier = Modifier.height(20.dp))
         ProbeConfigurationSection(
-            context = context,
             activeProbeSession = activeProbeSession,
             channelName = channelName,
             packageInput = packageInput,
@@ -164,7 +163,7 @@ private fun AppHome(
                 packageInputError = null
                 packageHint = packageAvailabilityHint(context, packageInput)
             },
-        onScenarioChange = { scenario = it },
+            onScenarioChange = { scenario = it },
             onActionChange = { action = it },
             onOpenNotificationPermissionPage = onOpenNotificationAccessPage,
             onStartProbeSession = {
@@ -189,6 +188,8 @@ private fun AppHome(
                 }
             },
             onEndProbeSession = {
+                val result = ProbeSessionRepository.endSession()
+                if (result == null) return@ProbeConfigurationSection
                 val bundle = ProbeSessionRepository.completedSessions.value
                 if (bundle.isNotEmpty()) {
                     reportText = buildProbeReportText(
@@ -199,7 +200,6 @@ private fun AppHome(
                         )
                     )
                 }
-                ProbeSessionRepository.endSession()
             },
             needPermissionHint = { pkg ->
                 packageInput.isNotBlank() && !NotificationEventRepository.isPackageEnabled(context, pkg)
@@ -279,7 +279,7 @@ private fun AppHome(
 }
 
 @Composable
-private fun AppHomeHeaderSection(state: NotificationListenerState) {
+private fun AppHomeHeaderSection(state: ListenerStatusState) {
     Text(text = "${stringResource(R.string.app_name_label)}：${stringResource(R.string.app_name)}")
     Text(text = "${stringResource(R.string.version_name_label)}：${BuildConfig.VERSION_NAME}")
     Text(text = "${stringResource(R.string.version_code_label)}：${BuildConfig.VERSION_CODE}")
@@ -308,7 +308,6 @@ private fun AppHomeHeaderSection(state: NotificationListenerState) {
 
 @Composable
 private fun ProbeConfigurationSection(
-    context: Context,
     activeProbeSession: ProbeSessionConfig?,
     channelName: String,
     packageInput: String,
@@ -414,7 +413,7 @@ private fun ProbeConfigurationSection(
 
 @Composable
 private fun ProbeReportSection(
-    probeSessions: List<ProbeSessionBundle>,
+    probeSessions: List<ProbeSessionResult>,
     context: Context,
     reportText: String,
     reportExportPath: String?,
