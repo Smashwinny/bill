@@ -45,8 +45,9 @@ class NotificationListenerStateTest {
 
         assertTrue(manifest.contains("android:permission=\"android.permission.BIND_NOTIFICATION_LISTENER_SERVICE\""))
         assertFalse(manifest.contains("android.permission.INTERNET"))
+        // V1.1 §3.2 起 READ_SMS/RECEIVE_SMS 为正式采集通道（侧载直申）；
+        // SEND_SMS 永久禁止——本应用只读短信，绝不发送。
         assertFalse(manifest.contains("android.permission.SEND_SMS"))
-        assertFalse(manifest.contains("android.permission.READ_SMS"))
         assertFalse(manifest.contains("android.permission.READ_CONTACTS"))
         assertFalse(manifest.contains("android.permission.WRITE_CONTACTS"))
         assertFalse(manifest.contains("android.permission.WRITE_EXTERNAL_STORAGE"))

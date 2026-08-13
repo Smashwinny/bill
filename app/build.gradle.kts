@@ -3,6 +3,7 @@ import java.time.Instant
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.devtools.ksp")
 }
 
 val buildTimeValue: String = (findProperty("BUILD_TIME") as String?)
@@ -20,8 +21,8 @@ android {
         applicationId = "com.hulk.pillsapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.0.4-t04-fix1"
+        versionCode = 7
+        versionName = "1.2.0-m2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(
@@ -55,6 +56,10 @@ android {
     }
 }
 
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.06.00"))
     implementation("androidx.compose.ui:ui")
@@ -63,6 +68,14 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.1")
     implementation("androidx.core:core-ktx:1.13.1")
 
+    implementation("androidx.room:room-runtime:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("net.zetetic:android-database-sqlcipher:4.5.4")
+
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.24")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.1")
+    androidTestImplementation("androidx.room:room-testing:2.6.1")
 }

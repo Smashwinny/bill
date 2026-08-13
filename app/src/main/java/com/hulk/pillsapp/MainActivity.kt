@@ -2,10 +2,13 @@ package com.hulk.pillsapp
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -45,6 +48,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import com.hulk.pillsapp.ledger.LedgerKernel
+import com.hulk.pillsapp.ledger.SmsBackfill
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -70,17 +75,40 @@ class MainActivity : ComponentActivity() {
         refreshState(this)
     }
 
+    private val refreshTick = kotlinx.coroutines.flow.MutableStateFlow(0)
+
+    private val smsPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        if (grants[android.Manifest.permission.READ_SMS] == true) {
+            LedgerKernel.backfillSms(this)
+        }
+        refreshState(this)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         refreshState(this)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
+                    val tick by refreshTick.collectAsState()
                     AppHome(
+                        refreshTick = tick,
                         onOpenNotificationAccessPage = {
                             val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
                             permissionLauncher.launch(intent)
                         },
+                        onRequestSmsPermissions = {
+                            smsPermissionLauncher.launch(
+                                arrayOf(
+                                    android.Manifest.permission.READ_SMS,
+                                    android.Manifest.permission.RECEIVE_SMS,
+                                )
+                            )
+                        },
+                        onOpenAutostartSettings = { openAutostartSettings() },
+                        onRequestBatteryUnrestricted = { requestBatteryUnrestricted() },
                         onRefresh = {
                             refreshState(this@MainActivity)
                         }
@@ -99,12 +127,49 @@ class MainActivity : ComponentActivity() {
         NotificationListenerState.refreshPermission(context)
         NotificationEventRepository.refreshPermissionPackages(context)
         NotificationEventRepository.refreshEvents(context)
+        LedgerKernel.refreshStatusAsync()
+        refreshTick.value++
+    }
+
+    /** HyperOS 自启动管理页（V1.1 §2 保活设置）；失败回退应用详情页。 */
+    private fun openAutostartSettings() {
+        val candidates = listOf(
+            Intent().setComponent(
+                ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
+            ),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")),
+        )
+        for (intent in candidates) {
+            try {
+                startActivity(intent)
+                return
+            } catch (_: Exception) {
+                // 尝试下一个入口
+            }
+        }
+    }
+
+    private fun requestBatteryUnrestricted() {
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName"),
+                )
+            )
+        } catch (_: Exception) {
+            // 系统不支持时忽略，用户可按引导手动设置
+        }
     }
 }
 
 @Composable
 private fun AppHome(
+    refreshTick: Int,
     onOpenNotificationAccessPage: () -> Unit,
+    onRequestSmsPermissions: () -> Unit,
+    onOpenAutostartSettings: () -> Unit,
+    onRequestBatteryUnrestricted: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -136,6 +201,13 @@ private fun AppHome(
         horizontalAlignment = Alignment.Start,
     ) {
         AppHomeHeaderSection(state)
+        KernelStatusSection()
+        M2ChannelSection(
+            refreshTick = refreshTick,
+            onRequestSmsPermissions = onRequestSmsPermissions,
+            onOpenAutostartSettings = onOpenAutostartSettings,
+            onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
+        )
 
         Spacer(modifier = Modifier.height(20.dp))
         ProbeConfigurationSection(
@@ -307,6 +379,75 @@ private fun AppHomeHeaderSection(state: ListenerStatusState) {
 }
 
 @Composable
+private fun KernelStatusSection() {
+    val status by LedgerKernel.status.collectAsState()
+    Spacer(modifier = Modifier.height(16.dp))
+    Text(text = stringResource(R.string.kernel_section_title))
+    Text(text = stringResource(R.string.kernel_counts_format, status.observationCount, status.candidateCount, status.pendingParseCount))
+    Text(
+        text = stringResource(
+            R.string.kernel_migration_format,
+            stringResource(if (status.t03Migrated) R.string.kernel_migration_done else R.string.kernel_migration_pending),
+        )
+    )
+    Text(text = "${stringResource(R.string.kernel_last_sweep_label)}：${formatEventTime(status.lastSweepAtMs)}")
+    Text(text = stringResource(R.string.kernel_open_gaps_format, status.openGapCount))
+    status.openGaps.take(5).forEach { gap ->
+        val endLabel = gap.endedAtMs?.let { formatEventTime(it) } ?: stringResource(R.string.kernel_gap_ongoing)
+        Text(
+            text = stringResource(
+                R.string.kernel_gap_item_format,
+                gap.detector,
+                formatEventTime(gap.startedAtMs),
+                endLabel,
+            )
+        )
+    }
+}
+
+@Composable
+private fun M2ChannelSection(
+    refreshTick: Int,
+    onRequestSmsPermissions: () -> Unit,
+    onOpenAutostartSettings: () -> Unit,
+    onRequestBatteryUnrestricted: () -> Unit,
+) {
+    val context = LocalContext.current
+    val smsGranted = remember(refreshTick) { SmsBackfill.hasPermission(context) }
+    val batteryWhitelisted = remember(refreshTick) {
+        (context.getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .isIgnoringBatteryOptimizations(context.packageName)
+    }
+    Spacer(modifier = Modifier.height(16.dp))
+    Text(text = stringResource(R.string.m2_section_title))
+    Text(
+        text = stringResource(
+            R.string.m2_sms_permission_format,
+            stringResource(if (smsGranted) R.string.m2_granted else R.string.m2_not_granted),
+        )
+    )
+    if (!smsGranted) {
+        Button(onClick = onRequestSmsPermissions, modifier = Modifier.fillMaxWidth()) {
+            Text(text = stringResource(R.string.m2_request_sms))
+        }
+    }
+    Text(
+        text = stringResource(
+            R.string.m2_battery_format,
+            stringResource(if (batteryWhitelisted) R.string.m2_granted else R.string.m2_not_granted),
+        )
+    )
+    if (!batteryWhitelisted) {
+        Button(onClick = onRequestBatteryUnrestricted, modifier = Modifier.fillMaxWidth()) {
+            Text(text = stringResource(R.string.m2_request_battery))
+        }
+    }
+    Button(onClick = onOpenAutostartSettings, modifier = Modifier.fillMaxWidth()) {
+        Text(text = stringResource(R.string.m2_autostart))
+    }
+}
+
+@Composable
 private fun ProbeConfigurationSection(
     activeProbeSession: ProbeSessionConfig?,
     channelName: String,
@@ -366,7 +507,7 @@ private fun ProbeConfigurationSection(
             Text(text = stringResource(R.string.t04_preset_wechat))
         }
         Button(
-            onClick = { onPreset("支付宝", "com.eg.android.Alipay") },
+            onClick = { onPreset("支付宝", "com.eg.android.AlipayGphone") },
             modifier = Modifier.weight(1f),
         ) {
             Text(text = stringResource(R.string.t04_preset_alipay))

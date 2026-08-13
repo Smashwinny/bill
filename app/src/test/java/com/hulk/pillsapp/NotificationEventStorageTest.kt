@@ -97,11 +97,12 @@ class NotificationEventStorageTest {
     }
 
     @Test
-    fun manifestShouldNotDeclareInternetOrStorageOrSmsPermissions() {
+    fun manifestShouldNotDeclareInternetOrContactsPermissions() {
+        // V1.1 §3.2 起短信权限属正式采集通道（侧载直申），不再禁止；
+        // 其余高危权限仍然禁止。
         val manifestPath = Paths.get("src/main/AndroidManifest.xml")
         val manifest = String(Files.readAllBytes(manifestPath))
         assertFalse(manifest.contains("android.permission.INTERNET"))
-        assertFalse(manifest.contains("android.permission.RECEIVE_SMS"))
         assertFalse(manifest.contains("android.permission.READ_CONTACTS"))
         assertFalse(manifest.contains("android.permission.WRITE_EXTERNAL_STORAGE"))
         assertFalse(manifest.contains("SYSTEM_ALERT_WINDOW"))

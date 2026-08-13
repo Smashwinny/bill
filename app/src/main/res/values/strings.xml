@@ -48,4 +48,21 @@
     <string name="t04_target_package_required_permission">目标包未在白名单中时可能收不到；开始会自动加入白名单。</string>
     <string name="t04_preset_wechat">微信（预置）</string>
     <string name="t04_preset_alipay">支付宝（预置）</string>
+    <string name="kernel_section_title">完整性内核（M1）</string>
+    <string name="kernel_counts_format">观察 %1$d 条 · 候选交易 %2$d 笔 · 待解析 %3$d 条</string>
+    <string name="kernel_migration_format">T03 数据迁移：%1$s</string>
+    <string name="kernel_migration_done">已完成</string>
+    <string name="kernel_migration_pending">未完成</string>
+    <string name="kernel_last_sweep_label">最近补偿扫描</string>
+    <string name="kernel_open_gaps_format">未闭合覆盖缺口：%1$d 个</string>
+    <string name="kernel_gap_item_format">%1$s · 开始 %2$s · 结束 %3$s</string>
+    <string name="kernel_gap_ongoing">持续中</string>
+    <string name="m2_section_title">采集通道与保活（M2）</string>
+    <string name="m2_sms_permission_format">短信权限：%1$s</string>
+    <string name="m2_battery_format">电池优化白名单：%1$s</string>
+    <string name="m2_granted">已授权</string>
+    <string name="m2_not_granted">未授权</string>
+    <string name="m2_request_sms">请求短信权限（银行短信观察）</string>
+    <string name="m2_request_battery">设为电池无限制</string>
+    <string name="m2_autostart">打开自启动设置（HyperOS）</string>
 </resources>
