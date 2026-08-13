@@ -203,6 +203,18 @@ abstract class CanonicalDao {
         occurredAtMs: Long,
     )
 
+    @Query(
+        "UPDATE canonical_transaction SET type = :type, status = :status, " +
+            "amount_cents = :amountCents, merchant_hint = :purpose WHERE id = :id"
+    )
+    abstract fun updateVerification(
+        id: Long,
+        type: TxType,
+        status: TxStatus,
+        amountCents: Long?,
+        purpose: String?,
+    )
+
     /**
      * 强标识合并（V1 §5.2）：strong_id_hash 冲突时不新增交易，只补证据链接。
      * 返回交易 id；无强标识的候选每次独立成行（V1 §5.1 禁止弱合并）。
@@ -255,6 +267,97 @@ abstract class CanonicalDao {
 
     @Query("SELECT COUNT(*) FROM evidence_link WHERE observation_id = :observationId")
     abstract fun countEvidenceForObservation(observationId: Long): Long
+}
+
+@Dao
+abstract class BehaviorDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    abstract fun insertSignalReceiptIgnore(receipt: BehaviorSignalReceiptEntity): Long
+
+    @Query("SELECT * FROM behavior_signal_receipt WHERE occurrence_id = :occurrenceId LIMIT 1")
+    abstract fun findSignalReceipt(occurrenceId: String): BehaviorSignalReceiptEntity?
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    abstract fun insertCandidateIgnore(candidate: BehaviorCandidateEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    abstract fun insertTemplateIgnore(template: BehaviorTemplateEntity): Long
+
+    @Update
+    abstract fun updateTemplate(template: BehaviorTemplateEntity)
+
+    @Insert
+    abstract fun insertDecision(decision: BehaviorDecisionEntity): Long
+
+    @Query("SELECT * FROM behavior_candidate WHERE id = :id")
+    abstract fun findCandidate(id: Long): BehaviorCandidateEntity?
+
+    @Query("SELECT * FROM behavior_candidate WHERE observation_id = :observationId LIMIT 1")
+    abstract fun findCandidateByObservation(observationId: Long): BehaviorCandidateEntity?
+
+    @Query(
+        "UPDATE behavior_candidate SET ambiguous_repeat_count = ambiguous_repeat_count + 1, " +
+            "updated_at_ms = :nowMs WHERE observation_id = :observationId"
+    )
+    abstract fun incrementAmbiguousRepeat(observationId: Long, nowMs: Long): Int
+
+    @Query(
+        "UPDATE behavior_template SET auto_enabled = 0, consecutive_positive_count = 0, " +
+            "updated_at_ms = :nowMs WHERE template_key = :templateKey"
+    )
+    abstract fun suspendTemplateForAmbiguity(templateKey: String, nowMs: Long): Int
+
+    @Query("SELECT * FROM behavior_template WHERE template_key = :templateKey LIMIT 1")
+    abstract fun findTemplate(templateKey: String): BehaviorTemplateEntity?
+
+    @Query(
+        "UPDATE behavior_candidate SET kind = :kind, amount_cents = :amountCents, " +
+            "purpose = :purpose, state = :state, updated_at_ms = :nowMs, decided_at_ms = :nowMs " +
+            "WHERE id = :id AND state = :expectedState"
+    )
+    abstract fun transition(
+        id: Long,
+        expectedState: BehaviorCandidateState,
+        state: BehaviorCandidateState,
+        kind: BehaviorKind,
+        amountCents: Long?,
+        purpose: String?,
+        nowMs: Long,
+    ): Int
+
+    @Query(
+        "SELECT * FROM behavior_candidate ORDER BY " +
+            "CASE state WHEN 'PENDING' THEN 0 WHEN 'AUTO_RECORDED' THEN 1 ELSE 2 END, " +
+            "occurred_at_ms DESC LIMIT :limit"
+    )
+    abstract fun listRecent(limit: Int = 80): List<BehaviorCandidateEntity>
+
+    @Query("SELECT COUNT(*) FROM behavior_candidate WHERE state = :state")
+    abstract fun countByState(state: BehaviorCandidateState): Long
+
+    @Query("SELECT COUNT(*) FROM behavior_template WHERE auto_enabled = 1")
+    abstract fun countAutoTemplates(): Long
+
+    @Query("SELECT COUNT(*) FROM behavior_decision")
+    abstract fun countDecisions(): Long
+
+    @Query("SELECT COUNT(*) FROM behavior_signal_receipt")
+    abstract fun countSignalReceipts(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM behavior_signal_receipt LEFT JOIN raw_observation " +
+            "ON raw_observation.id = behavior_signal_receipt.observation_id " +
+            "WHERE raw_observation.id IS NULL"
+    )
+    abstract fun countOrphanSignalReceipts(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM behavior_candidate LEFT JOIN raw_observation " +
+            "ON raw_observation.id = behavior_candidate.observation_id " +
+            "LEFT JOIN canonical_transaction ON canonical_transaction.id = behavior_candidate.canonical_tx_id " +
+            "WHERE raw_observation.id IS NULL OR canonical_transaction.id IS NULL"
+    )
+    abstract fun countOrphans(): Long
 }
 
 @Dao

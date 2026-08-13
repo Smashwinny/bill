@@ -107,7 +107,9 @@ class NotificationEventStorageTest {
         assertFalse(manifest.contains("android.permission.WRITE_EXTERNAL_STORAGE"))
         assertFalse(manifest.contains("SYSTEM_ALERT_WINDOW"))
         assertFalse(manifest.contains("android.permission.SYSTEM_ALERT_WINDOW"))
-        assertFalse(manifest.contains("android.permission.BIND_ACCESSIBILITY_SERVICE"))
+        // M5 行为学习以系统绑定权限声明专用无障碍服务；它不是普通运行时权限。
+        assertTrue(manifest.contains("android.permission.BIND_ACCESSIBILITY_SERVICE"))
+        assertFalse(manifest.contains("android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"))
         assertTrue(manifest.contains("android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"))
     }
 

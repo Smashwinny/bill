@@ -14,6 +14,7 @@
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
     <!-- HyperOS 保活引导：请求加入电池优化白名单 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".PillsApp"
@@ -38,6 +39,21 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+        <service
+            android:name=".PaymentBehaviorAccessibilityService"
+            android:exported="false"
+            android:label="@string/m5_accessibility_service_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/behavior_accessibility_service" />
+        </service>
+        <receiver
+            android:name=".ledger.BehaviorCandidateActionReceiver"
+            android:exported="false" />
         <receiver
             android:name=".ledger.BootReceiver"
             android:exported="true">

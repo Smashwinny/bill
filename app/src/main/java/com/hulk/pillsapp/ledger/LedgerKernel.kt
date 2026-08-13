@@ -44,6 +44,15 @@ data class KernelStatus(
     val statementIncompleteImportCount: Long = 0,
     val statementIntegrityFailureCount: Long = 0,
     val orphanStatementLinkCount: Long = 0,
+    val behaviorPendingCount: Long = 0,
+    val behaviorConfirmedCount: Long = 0,
+    val behaviorAutoRecordedCount: Long = 0,
+    val behaviorAutoTemplateCount: Long = 0,
+    val behaviorDecisionCount: Long = 0,
+    val behaviorSignalReceiptCount: Long = 0,
+    val orphanBehaviorSignalReceiptCount: Long = 0,
+    val orphanBehaviorCount: Long = 0,
+    val behaviorCandidates: List<BehaviorCandidateEntity> = emptyList(),
     val sourceCoverage: List<SourceCoverageItem> = emptyList(),
     val statementImports: List<StatementImportSummary> = emptyList(),
     val debtAccounts: List<DebtAccountEntity> = emptyList(),
@@ -66,10 +75,14 @@ object LedgerKernel {
     private const val PREF_T03_MIGRATED = "t03_migrated"
     private const val PREF_LAST_SWEEP_AT = "last_sweep_at_ms"
     private const val PREF_LAST_HEALTH_CHECK_AT = "last_health_check_at_ms"
+    private const val PREF_LAST_A11Y_HEARTBEAT_AT = "last_a11y_heartbeat_at_ms"
     private const val STATEMENT_IMPORT_ROW_BATCH_SIZE = 25
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "ledger-ingest")
+    }
+    private val behaviorExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "behavior-ingest")
     }
 
     @Volatile
@@ -77,6 +90,9 @@ object LedgerKernel {
 
     @Volatile
     private var database: LedgerDatabase? = null
+
+    @Volatile
+    private var behaviorOutbox: BehaviorSignalOutbox? = null
 
     @Volatile
     private var executorThread: Thread? = null
@@ -88,6 +104,9 @@ object LedgerKernel {
     fun init(context: Context) {
         if (database != null) return
         appContext = context.applicationContext
+        behaviorOutbox = BehaviorSignalOutbox(
+            java.io.File(context.applicationContext.filesDir, "behavior_signal_outbox")
+        )
         net.sqlcipher.database.SQLiteDatabase.loadLibs(context.applicationContext)
         val passphrase = DbCrypto.getOrCreatePassphrase(context)
         migratePlaintextIfNeeded(context, passphrase)
@@ -95,7 +114,7 @@ object LedgerKernel {
         // 因此每个 factory 必须持有独立拷贝。
         database = Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, DB_NAME)
             .openHelperFactory(net.sqlcipher.database.SupportFactory(passphrase.copyOf()))
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
             .build()
         executor.submit { executorThread = Thread.currentThread() }.get(2, TimeUnit.SECONDS)
@@ -115,12 +134,16 @@ object LedgerKernel {
     private val migrationTablesParentFirst = listOf(
         "raw_observation",
         "canonical_transaction",
+        "behavior_template",
         "debt_account",
         "statement_import",
         "statement_artifact_chunk",
         "statement_row",
         "observation_revision",
         "evidence_link",
+        "behavior_signal_receipt",
+        "behavior_candidate",
+        "behavior_decision",
         "debt_account_evidence",
         "account_discovery_scan",
         "statement_import_row",
@@ -151,7 +174,7 @@ object LedgerKernel {
         )
         val encryptedDb = Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, encName)
             .openHelperFactory(net.sqlcipher.database.SupportFactory(passphrase.copyOf()))
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .build()
         try {
             val writable = encryptedDb.openHelper.writableDatabase
@@ -410,6 +433,371 @@ object LedgerKernel {
         }
     }
 
+    // ------------------------------------------------------------------
+    // M5 事件驱动行为学习
+    // ------------------------------------------------------------------
+
+    /**
+     * 一个无障碍片段只创建一条 A11Y 原始证据和一条候选交易。
+     * sourceKey 使用独立片段 ID；相同金额和接近时间从不参与跨片段去重。
+     */
+    fun enqueueBehaviorSignal(signal: BehaviorSignal) {
+        val staged = try {
+            requireNotNull(behaviorOutbox).stage(signal)
+        } catch (failure: Throwable) {
+            recordAsyncFailure(failure)
+            return
+        }
+        behaviorExecutor.submit {
+            try {
+                ingestBehaviorSignalBlocking(signal)
+                runCatching { requireNotNull(behaviorOutbox).complete(staged) }
+                    .onFailure(::recordAsyncFailure)
+            } catch (failure: Throwable) {
+                recordAsyncFailure(failure)
+            }
+        }
+    }
+
+    /** 无障碍回调返回前等待独立短事务提交；不经过可能含历史回扫的共享队列。 */
+    fun persistBehaviorSignal(signal: BehaviorSignal): Boolean {
+        val staged = runCatching { requireNotNull(behaviorOutbox).stage(signal) }
+            .onFailure(::recordAsyncFailure)
+            .getOrNull()
+        val committed = try {
+            behaviorExecutor.submit<BehaviorCandidateEntity?> {
+                ingestBehaviorSignalBlocking(signal)
+            }.get()
+            true
+        } catch (failure: Throwable) {
+            recordAsyncFailure(failure)
+            false
+        }
+        if (committed) {
+            staged?.let { file ->
+                runCatching { requireNotNull(behaviorOutbox).complete(file) }
+                    .onFailure(::recordAsyncFailure)
+            }
+            return true
+        }
+        // 数据库暂不可写但待办已 fsync：回调可以安全返回，由启动恢复重放。
+        return staged != null
+    }
+
+    fun drainBehaviorOutbox() {
+        behaviorExecutor.submit {
+            try {
+                requireNotNull(behaviorOutbox).pending().forEach { pending ->
+                    ingestBehaviorSignalBlocking(pending.signal)
+                    requireNotNull(behaviorOutbox).complete(pending.file)
+                }
+            } catch (failure: Throwable) {
+                recordAsyncFailure(failure)
+                markA11yDisconnected("行为片段待办恢复失败")
+            }
+        }
+    }
+
+    fun markA11yConnected() {
+        markA11yHeartbeat()
+        behaviorExecutor.submit {
+            runCatching {
+                requireDb().coverageGapDao().closeOpenByDetector(
+                    GapDetectors.A11Y_SERVICE,
+                    System.currentTimeMillis(),
+                )
+                refreshStatusBlocking()
+            }.onFailure(::recordAsyncFailure)
+        }
+    }
+
+    fun markA11yHeartbeat() {
+        appContext?.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            ?.edit()?.putLong(PREF_LAST_A11Y_HEARTBEAT_AT, System.currentTimeMillis())?.apply()
+    }
+
+    fun isA11yHeartbeatFresh(maxAgeMs: Long = 30 * 60 * 1000L): Boolean {
+        val context = appContext ?: return false
+        val last = context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getLong(PREF_LAST_A11Y_HEARTBEAT_AT, 0L)
+        return last > 0 && System.currentTimeMillis() - last in 0..maxAgeMs
+    }
+
+    fun markA11yDisconnected(note: String) {
+        behaviorExecutor.submit {
+            runCatching {
+                val dao = requireDb().coverageGapDao()
+                if (dao.countOpenByDetector(GapDetectors.A11Y_SERVICE) == 0L) {
+                    dao.insert(
+                        CoverageGapEntity(
+                            detector = GapDetectors.A11Y_SERVICE,
+                            startedAtMs = System.currentTimeMillis(),
+                            endedAtMs = null,
+                            state = GapState.ACTIVE,
+                            note = note,
+                        )
+                    )
+                }
+                refreshStatusBlocking()
+            }.onFailure(::recordAsyncFailure)
+        }
+    }
+
+    /** 专用高优先级执行器直接持久化，不让无障碍主回调等待共享队列或抛超时。 */
+    private fun ingestBehaviorSignalBlocking(signal: BehaviorSignal): BehaviorCandidateEntity? {
+        val now = System.currentTimeMillis()
+        val kindText = if (signal.kind == BehaviorKind.REFUND) "退款成功" else "支付成功"
+        val amountText = signal.amountCents?.let { cents ->
+            "%d.%02d元".format(cents / 100, kotlin.math.abs(cents % 100))
+        } ?: "金额待确认"
+        val title = "行为识别：$kindText"
+        val body = "$kindText $amountText ${signal.featureSummary}"
+        val notificationAvailable = appContext?.let(BehaviorCandidateNotifier::isAvailableForAuto) == true
+        val inserted = run {
+            var created: BehaviorCandidateEntity? = null
+            requireDb().runInTransaction {
+                val db = requireDb()
+                val behaviorDao = db.behaviorDao()
+                // DB 已提交但 outbox 尚未删除时，重放必须连 duplicate_count 都不改变。
+                if (behaviorDao.findSignalReceipt(signal.occurrenceId) != null) {
+                    return@runInTransaction
+                }
+                val observation = RawObservationEntity(
+                    source = ObservationSource.A11Y,
+                    sourceKey = signal.clipId,
+                    userHandle = 0,
+                    packageName = signal.packageName,
+                    postTimeMs = signal.occurredAtMs,
+                    receivedAtMs = now,
+                    title = title,
+                    body = body,
+                    contentHash = sha256Hex(title + "\u0000" + body),
+                    capturePath = CapturePath.A11Y,
+                    parseState = ParseState.PARSED,
+                    createdAtMs = now,
+                )
+                val outcome = db.observationDao().ingest(observation)
+                val receiptInserted = behaviorDao.insertSignalReceiptIgnore(
+                    BehaviorSignalReceiptEntity(
+                        occurrenceId = signal.occurrenceId,
+                        observationId = outcome.id,
+                        ambiguousRepeat = signal.ambiguousRepeat,
+                        appliedAtMs = now,
+                    )
+                )
+                check(receiptInserted != -1L) { "behavior occurrence receipt race" }
+                if (outcome is IngestOutcome.New) {
+                    val canonicalId = db.canonicalDao().createCandidateWithEvidence(
+                        tx = CanonicalTransactionEntity(
+                            strongIdHash = null,
+                            type = if (signal.kind == BehaviorKind.REFUND) TxType.REFUND else TxType.PAYMENT,
+                            status = TxStatus.DETECTED,
+                            amountCents = signal.amountCents,
+                            merchantHint = null,
+                            occurredAtMs = signal.occurredAtMs,
+                            backfilledFrom = null,
+                            createdAtMs = now,
+                        ),
+                        observationId = outcome.id,
+                        matchReason = "A11Y_BEHAVIOR_CLIP",
+                        nowMs = now,
+                    )
+                    behaviorDao.insertTemplateIgnore(
+                        BehaviorTemplateEntity(
+                            templateKey = signal.templateKey,
+                            packageName = signal.packageName,
+                            kind = signal.kind,
+                            routeSignature = signal.routeSignature,
+                            appVersionCode = signal.appVersionCode,
+                            positiveCount = 0,
+                            negativeCount = 0,
+                            consecutivePositiveCount = 0,
+                            autoEnabled = false,
+                            createdAtMs = now,
+                            updatedAtMs = now,
+                        )
+                    )
+                    val template = behaviorDao.findTemplate(signal.templateKey)
+                    val autoRecord = BehaviorLearningPolicy.mayAutoRecord(
+                        template,
+                        signal,
+                        notificationAvailable,
+                    )
+                    val candidate = BehaviorCandidateEntity(
+                        publicId = signal.clipId,
+                        observationId = outcome.id,
+                        canonicalTxId = canonicalId,
+                        templateKey = signal.templateKey,
+                        packageName = signal.packageName,
+                        kind = signal.kind,
+                        amountCents = signal.amountCents,
+                        occurredAtMs = signal.occurredAtMs,
+                        confidence = signal.confidence,
+                        consumedIntent = signal.consumedIntent,
+                        routeSignature = signal.routeSignature,
+                        appVersionCode = signal.appVersionCode,
+                        ambiguousRepeatCount = if (signal.ambiguousRepeat) 1 else 0,
+                        featureSummary = signal.featureSummary,
+                        purpose = null,
+                        state = if (autoRecord) {
+                            BehaviorCandidateState.AUTO_RECORDED
+                        } else {
+                            BehaviorCandidateState.PENDING
+                        },
+                        createdAtMs = now,
+                        updatedAtMs = now,
+                        decidedAtMs = now.takeIf { autoRecord },
+                    )
+                    val candidateId = behaviorDao.insertCandidateIgnore(candidate)
+                    if (candidateId != -1L) {
+                        if (signal.ambiguousRepeat) {
+                            behaviorDao.suspendTemplateForAmbiguity(signal.templateKey, now)
+                            openAmbiguousRepeatGap(db, now)
+                        }
+                        if (autoRecord) {
+                            db.canonicalDao().updateVerification(
+                                id = canonicalId,
+                                type = if (signal.kind == BehaviorKind.REFUND) TxType.REFUND else TxType.PAYMENT,
+                                status = TxStatus.SUCCESS,
+                                amountCents = signal.amountCents,
+                                purpose = null,
+                            )
+                            behaviorDao.insertDecision(
+                                BehaviorDecisionEntity(
+                                    candidateId = candidateId,
+                                    decision = BehaviorDecision.AUTO_RECORD,
+                                    actor = BehaviorDecisionActor.MODEL,
+                                    kind = signal.kind,
+                                    amountCents = signal.amountCents,
+                                    purpose = null,
+                                    createdAtMs = now,
+                                )
+                            )
+                        }
+                        created = candidate.copy(id = candidateId)
+                    }
+                } else {
+                    db.observationDao().updateParseState(outcome.id, ParseState.PARSED)
+                    if (signal.ambiguousRepeat) {
+                        db.behaviorDao().incrementAmbiguousRepeat(outcome.id, now)
+                        db.behaviorDao().findCandidateByObservation(outcome.id)?.let { existing ->
+                            db.behaviorDao().suspendTemplateForAmbiguity(existing.templateKey, now)
+                        }
+                        openAmbiguousRepeatGap(db, now)
+                        created = db.behaviorDao().findCandidateByObservation(outcome.id)
+                    }
+                }
+            }
+            created
+        }
+        if (inserted != null) {
+            appContext?.let { BehaviorCandidateNotifier.show(it, inserted) }
+            submitAsync { refreshStatusBlocking() }
+        }
+        return inserted
+    }
+
+    private fun openAmbiguousRepeatGap(db: LedgerDatabase, nowMs: Long) {
+        val gapDao = db.coverageGapDao()
+        if (gapDao.countOpenByDetector(GapDetectors.A11Y_AMBIGUOUS_REPEAT) == 0L) {
+            gapDao.insert(
+                CoverageGapEntity(
+                    detector = GapDetectors.A11Y_AMBIGUOUS_REPEAT,
+                    startedAtMs = nowMs,
+                    endedAtMs = null,
+                    state = GapState.ACTIVE,
+                    note = "检测到无法区分为页面刷新还是另一笔付款的重复成功终态",
+                )
+            )
+        }
+    }
+
+    /** 通知按钮与应用内按钮共用此幂等状态机。 */
+    fun applyBehaviorDecision(
+        candidateId: Long,
+        decision: BehaviorDecision,
+        amountCents: Long? = null,
+        purpose: String? = null,
+    ) {
+        try {
+            behaviorExecutor.submit<BehaviorActionResult> {
+                applyBehaviorDecisionBlocking(candidateId, decision, amountCents, purpose)
+            }.get()
+        } catch (failure: Throwable) {
+            recordAsyncFailure(failure)
+        }
+    }
+
+    fun applyBehaviorDecisionAsync(
+        candidateId: Long,
+        decision: BehaviorDecision,
+        onComplete: () -> Unit,
+    ) {
+        try {
+            behaviorExecutor.submit {
+                try {
+                    applyBehaviorDecisionBlocking(candidateId, decision, null, null)
+                } catch (failure: Throwable) {
+                    recordAsyncFailure(failure)
+                } finally {
+                    onComplete()
+                }
+            }
+        } catch (failure: Throwable) {
+            recordAsyncFailure(failure)
+            onComplete()
+        }
+    }
+
+    private fun applyBehaviorDecisionBlocking(
+        candidateId: Long,
+        decision: BehaviorDecision,
+        amountCents: Long?,
+        purpose: String?,
+    ): BehaviorActionResult {
+        val now = System.currentTimeMillis()
+        val cleanPurpose = purpose?.trim()?.take(80)?.ifBlank { null }
+        val result = BehaviorDecisionEngine.apply(
+            db = requireDb(),
+            candidateId = candidateId,
+            decision = decision,
+            amountCents = amountCents,
+            purpose = cleanPurpose,
+            nowMs = now,
+        )
+        if (result.changed) {
+            appContext?.let { context ->
+                BehaviorCandidateNotifier.cancel(context, candidateId)
+                result.candidate?.takeIf { it.state == BehaviorCandidateState.AUTO_RECORDED }
+                    ?.let { BehaviorCandidateNotifier.show(context, it) }
+            }
+            submitAsync { refreshStatusBlocking() }
+        }
+        return result
+    }
+
+    fun createDebugBehaviorCandidate() {
+        val now = System.currentTimeMillis()
+        val templateKey = sha256Hex("debug-behavior-template")
+        enqueueBehaviorSignal(
+            BehaviorSignal(
+                occurrenceId = "debug-occurrence-${java.util.UUID.randomUUID()}",
+                clipId = "debug-${java.util.UUID.randomUUID()}",
+                packageName = "com.hulk.pillsapp.debug-simulator",
+                kind = BehaviorKind.PAYMENT,
+                amountCents = 1L,
+                occurredAtMs = now,
+                templateKey = templateKey,
+                confidence = 95,
+                consumedIntent = true,
+                routeSignature = "debug-route-v1",
+                appVersionCode = 1L,
+                ambiguousRepeat = false,
+                featureSummary = "events=2;terminal=PAYMENT_SUCCESS;amounts=1;intent=1;debug=1",
+            )
+        )
+    }
+
     /** M4.0 只存入待校验账单证据，不创建正式交易或负债余额。 */
     fun commitStatementPreview(
         preview: StatementPreview,
@@ -577,6 +965,15 @@ object LedgerKernel {
             statementIncompleteImportCount = db.statementDao().countIncompleteImports(),
             statementIntegrityFailureCount = db.statementDao().countCompletedIntegrityFailures(),
             orphanStatementLinkCount = db.statementDao().countOrphanLinks(),
+            behaviorPendingCount = db.behaviorDao().countByState(BehaviorCandidateState.PENDING),
+            behaviorConfirmedCount = db.behaviorDao().countByState(BehaviorCandidateState.CONFIRMED),
+            behaviorAutoRecordedCount = db.behaviorDao().countByState(BehaviorCandidateState.AUTO_RECORDED),
+            behaviorAutoTemplateCount = db.behaviorDao().countAutoTemplates(),
+            behaviorDecisionCount = db.behaviorDao().countDecisions(),
+            behaviorSignalReceiptCount = db.behaviorDao().countSignalReceipts(),
+            orphanBehaviorSignalReceiptCount = db.behaviorDao().countOrphanSignalReceipts(),
+            orphanBehaviorCount = db.behaviorDao().countOrphans(),
+            behaviorCandidates = db.behaviorDao().listRecent(),
             sourceCoverage = sourceCoverage,
             statementImports = statementImports,
             debtAccounts = db.debtAccountDao().listVisible(),
@@ -588,7 +985,7 @@ object LedgerKernel {
         try {
             java.io.File(context.filesDir, "kernel_status_snapshot.txt").writeText(
                 buildString {
-                    appendLine("schema_version=4")
+                    appendLine("schema_version=5")
                     appendLine("debt_parser_version=$DEBT_DISCOVERY_PARSER_VERSION")
                     appendLine("statement_parser_version=$STATEMENT_PARSER_VERSION")
                     appendLine("observations=${snapshot.observationCount}")
@@ -621,6 +1018,14 @@ object LedgerKernel {
                     appendLine("statement_incomplete_imports=${snapshot.statementIncompleteImportCount}")
                     appendLine("statement_integrity_failures=${snapshot.statementIntegrityFailureCount}")
                     appendLine("orphan_statement_links=${snapshot.orphanStatementLinkCount}")
+                    appendLine("behavior_pending=${snapshot.behaviorPendingCount}")
+                    appendLine("behavior_confirmed=${snapshot.behaviorConfirmedCount}")
+                    appendLine("behavior_auto_recorded=${snapshot.behaviorAutoRecordedCount}")
+                    appendLine("behavior_auto_templates=${snapshot.behaviorAutoTemplateCount}")
+                    appendLine("behavior_decisions=${snapshot.behaviorDecisionCount}")
+                    appendLine("behavior_signal_receipts=${snapshot.behaviorSignalReceiptCount}")
+                    appendLine("orphan_behavior_signal_receipts=${snapshot.orphanBehaviorSignalReceiptCount}")
+                    appendLine("orphan_behavior=${snapshot.orphanBehaviorCount}")
                     appendLine("t03_migrated=${snapshot.t03Migrated}")
                     appendLine("snapshot_at_ms=${System.currentTimeMillis()}")
                 }

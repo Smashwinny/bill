@@ -275,6 +275,187 @@ class LedgerDatabaseInstrumentedTest {
     }
 
     @Test
+    fun migrationFourToFivePreservesRowsAndCreatesEmptyBehaviorTables() {
+        val name = "migration-4-5.db"
+        migrationHelper.createDatabase(name, 4).apply {
+            execSQL(
+                "INSERT INTO raw_observation(id, source, source_key, user_handle, package_name, post_time_ms, received_at_ms, title, body, content_hash, capture_path, parse_state, duplicate_count, created_at_ms) " +
+                    "VALUES(1, 'NOTIFICATION', '0:key', 0, 'com.example.pay', 1000, 1001, '支付', '10元', 'h', 'LIVE_CALLBACK', 'PARSED', 0, 1001)"
+            )
+            close()
+        }
+        migrationHelper.runMigrationsAndValidate(name, 5, true, MIGRATION_4_5).use { migrated ->
+            migrated.query("SELECT COUNT(*) FROM raw_observation").use {
+                it.moveToFirst()
+                assertEquals(1, it.getInt(0))
+            }
+            listOf(
+                "behavior_signal_receipt",
+                "behavior_template",
+                "behavior_candidate",
+                "behavior_decision",
+            ).forEach { table ->
+                migrated.query("SELECT COUNT(*) FROM $table").use {
+                    it.moveToFirst()
+                    assertEquals(0, it.getInt(0))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun identicalAmountIndependentBehaviorClipsRemainSeparateAndTransitionIsIdempotent() {
+        val now = 1000L
+        db.behaviorDao().insertTemplateIgnore(
+            BehaviorTemplateEntity(
+                templateKey = "template",
+                packageName = "com.example.pay",
+                kind = BehaviorKind.PAYMENT,
+                routeSignature = "route",
+                appVersionCode = 1,
+                positiveCount = 0,
+                negativeCount = 0,
+                consecutivePositiveCount = 0,
+                autoEnabled = false,
+                createdAtMs = now,
+                updatedAtMs = now,
+            )
+        )
+        fun addClip(sourceKey: String): BehaviorCandidateEntity {
+            val observationId = db.observationDao().ingest(
+                observation("支付成功 10.00元", sourceKey).copy(
+                    source = ObservationSource.A11Y,
+                    sourceKey = sourceKey,
+                    capturePath = CapturePath.A11Y,
+                    parseState = ParseState.PARSED,
+                )
+            ).id
+            val canonicalId = db.canonicalDao().createCandidateWithEvidence(
+                CanonicalTransactionEntity(
+                    strongIdHash = null,
+                    type = TxType.PAYMENT,
+                    status = TxStatus.DETECTED,
+                    amountCents = 1000,
+                    merchantHint = null,
+                    occurredAtMs = now,
+                    backfilledFrom = null,
+                    createdAtMs = now,
+                ),
+                observationId,
+                "A11Y_BEHAVIOR_CLIP",
+                now,
+            )
+            val candidate = BehaviorCandidateEntity(
+                publicId = sourceKey,
+                observationId = observationId,
+                canonicalTxId = canonicalId,
+                templateKey = "template",
+                packageName = "com.example.pay",
+                kind = BehaviorKind.PAYMENT,
+                amountCents = 1000,
+                occurredAtMs = now,
+                confidence = 95,
+                consumedIntent = true,
+                routeSignature = "route",
+                appVersionCode = 1,
+                ambiguousRepeatCount = 0,
+                featureSummary = "safe",
+                purpose = null,
+                state = BehaviorCandidateState.PENDING,
+                createdAtMs = now,
+                updatedAtMs = now,
+                decidedAtMs = null,
+            )
+            return candidate.copy(id = db.behaviorDao().insertCandidateIgnore(candidate))
+        }
+        val first = addClip("a11y-one")
+        val second = addClip("a11y-two")
+        assertEquals(2L, db.canonicalDao().countAll())
+        assertEquals(2L, db.behaviorDao().countByState(BehaviorCandidateState.PENDING))
+        val accepted = BehaviorDecisionEngine.apply(
+            db, first.id, BehaviorDecision.CONFIRM_PAYMENT, 1000, "午餐", now + 1,
+        )
+        val repeated = BehaviorDecisionEngine.apply(
+            db, first.id, BehaviorDecision.CONFIRM_PAYMENT, 1000, "午餐", now + 2,
+        )
+        assertTrue(accepted.changed)
+        assertFalse(repeated.changed)
+        assertEquals(TxStatus.SUCCESS, db.canonicalDao().findById(first.canonicalTxId)?.status)
+        assertEquals("午餐", db.canonicalDao().findById(first.canonicalTxId)?.merchantHint)
+        assertEquals(1L, db.behaviorDao().countDecisions())
+        assertEquals(1, db.behaviorDao().findTemplate("template")?.positiveCount)
+        assertEquals(1, db.behaviorDao().incrementAmbiguousRepeat(first.observationId, now + 3))
+        assertEquals(1L, db.behaviorDao().findCandidate(first.id)?.ambiguousRepeatCount)
+        db.behaviorDao().findTemplate("template")?.let {
+            db.behaviorDao().updateTemplate(it.copy(autoEnabled = true, consecutivePositiveCount = 5))
+        }
+        assertEquals(1, db.behaviorDao().suspendTemplateForAmbiguity("template", now + 4))
+        assertFalse(db.behaviorDao().findTemplate("template")!!.autoEnabled)
+        assertEquals(BehaviorCandidateState.PENDING, db.behaviorDao().findCandidate(second.id)?.state)
+        assertEquals(0L, db.behaviorDao().countOrphans())
+    }
+
+    @Test
+    fun behaviorOutboxIsEncryptedRoundTrippableAndRemovable() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val directory = java.io.File(context.cacheDir, "behavior-outbox-${java.util.UUID.randomUUID()}")
+        val outbox = BehaviorSignalOutbox(directory)
+        val signal = BehaviorSignal(
+            occurrenceId = "outbox-occurrence",
+            clipId = "outbox-clip",
+            packageName = "com.example.pay",
+            kind = BehaviorKind.REFUND,
+            amountCents = 888,
+            occurredAtMs = 1234,
+            templateKey = "template",
+            confidence = 95,
+            consumedIntent = true,
+            routeSignature = "route",
+            appVersionCode = 1,
+            ambiguousRepeat = false,
+            featureSummary = "safe",
+        )
+        val file = outbox.stage(signal)
+        assertFalse(file.readBytes().toString(Charsets.UTF_8).contains("outbox-clip"))
+        assertEquals(signal, outbox.pending().single().signal)
+        outbox.complete(file)
+        assertTrue(outbox.pending().isEmpty())
+        directory.delete()
+    }
+
+    @Test
+    fun behaviorOccurrenceReceiptMakesReplaySideEffectsIdempotent() {
+        val now = 2000L
+        val observationId = db.observationDao().ingest(
+            RawObservationEntity(
+                source = ObservationSource.A11Y,
+                sourceKey = "receipt-clip",
+                userHandle = 0,
+                packageName = "com.example.pay",
+                postTimeMs = now,
+                receivedAtMs = now,
+                title = "行为识别：支付成功",
+                body = "脱敏摘要",
+                contentHash = "receipt-hash",
+                capturePath = CapturePath.A11Y,
+                parseState = ParseState.PARSED,
+                createdAtMs = now,
+            )
+        ).id
+        val receipt = BehaviorSignalReceiptEntity(
+            occurrenceId = "fixed-occurrence",
+            observationId = observationId,
+            ambiguousRepeat = true,
+            appliedAtMs = now,
+        )
+        assertTrue(db.behaviorDao().insertSignalReceiptIgnore(receipt) != -1L)
+        assertEquals(-1L, db.behaviorDao().insertSignalReceiptIgnore(receipt))
+        assertEquals(receipt, db.behaviorDao().findSignalReceipt(receipt.occurrenceId))
+        assertEquals(1L, db.behaviorDao().countSignalReceipts())
+        assertEquals(0L, db.behaviorDao().countOrphanSignalReceipts())
+    }
+
+    @Test
     fun statementImportIsIdempotentPerParserButNeverMergesRowOccurrences() {
         val now = 1000L
         fun imported(hash: String, publicId: String) = StatementImportEntity(

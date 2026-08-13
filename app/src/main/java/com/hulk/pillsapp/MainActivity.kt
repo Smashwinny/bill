@@ -1,5 +1,6 @@
 package com.hulk.pillsapp
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentName
@@ -49,6 +50,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import com.hulk.pillsapp.ledger.LedgerKernel
+import com.hulk.pillsapp.ledger.BehaviorCandidateEntity
+import com.hulk.pillsapp.ledger.BehaviorCandidateState
+import com.hulk.pillsapp.ledger.BehaviorDecision
+import com.hulk.pillsapp.ledger.BehaviorKind
 import com.hulk.pillsapp.ledger.SmsBackfill
 import com.hulk.pillsapp.ledger.DebtAccountStatus
 import com.hulk.pillsapp.ledger.DebtEventKind
@@ -62,6 +67,8 @@ import com.hulk.pillsapp.ledger.StatementSourceKind
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.math.BigDecimal
+import java.math.RoundingMode
 
 private val eventTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
@@ -122,6 +129,12 @@ class MainActivity : ComponentActivity() {
         refreshState(this)
     }
 
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        refreshState(this)
+    }
+
     private val statementFileLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -137,6 +150,16 @@ class MainActivity : ComponentActivity() {
                     val tick by refreshTick.collectAsState()
                     AppHome(
                         refreshTick = tick,
+                        onOpenAccessibilitySettings = {
+                            permissionLauncher.launch(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        },
+                        onRequestNotificationPermission = {
+                            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            } else {
+                                refreshState(this@MainActivity)
+                            }
+                        },
                         onOpenNotificationAccessPage = {
                             val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
                             permissionLauncher.launch(intent)
@@ -181,6 +204,7 @@ class MainActivity : ComponentActivity() {
         NotificationListenerState.refreshPermission(context)
         NotificationEventRepository.refreshPermissionPackages(context)
         NotificationEventRepository.refreshEvents(context)
+        BehaviorAccessibilityState.refreshPermission(context)
         LedgerKernel.refreshStatusAsync()
         refreshTick.value++
     }
@@ -220,6 +244,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AppHome(
     refreshTick: Int,
+    onOpenAccessibilitySettings: () -> Unit,
+    onRequestNotificationPermission: () -> Unit,
     onOpenNotificationAccessPage: () -> Unit,
     onRequestSmsPermissions: () -> Unit,
     onOpenAutostartSettings: () -> Unit,
@@ -256,6 +282,11 @@ private fun AppHome(
         horizontalAlignment = Alignment.Start,
     ) {
         AppHomeHeaderSection(state)
+        BehaviorLearningSection(
+            refreshTick = refreshTick,
+            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+            onRequestNotificationPermission = onRequestNotificationPermission,
+        )
         KernelStatusSection()
         M2ChannelSection(
             refreshTick = refreshTick,
@@ -660,6 +691,154 @@ private fun AppHomeHeaderSection(state: ListenerStatusState) {
     Text(text = "${stringResource(R.string.notification_last_connected_label)}：${formatEventTime(state.lastConnectedAtMs)}")
     Text(text = "${stringResource(R.string.notification_last_disconnected_label)}：${formatEventTime(state.lastDisconnectedAtMs)}")
 }
+
+private val behaviorStateLabels = mapOf(
+    BehaviorCandidateState.PENDING to "待确认（尚未记为成功）",
+    BehaviorCandidateState.CONFIRMED to "已由你确认",
+    BehaviorCandidateState.REJECTED to "已排除",
+    BehaviorCandidateState.AUTO_RECORDED to "已自动记账（可撤销）",
+    BehaviorCandidateState.UNDONE to "自动记账已撤销",
+)
+
+@Composable
+private fun BehaviorLearningSection(
+    refreshTick: Int,
+    onOpenAccessibilitySettings: () -> Unit,
+    onRequestNotificationPermission: () -> Unit,
+) {
+    val context = LocalContext.current
+    val accessibility by BehaviorAccessibilityState.state.collectAsState()
+    val status by LedgerKernel.status.collectAsState()
+    val notificationGranted = remember(refreshTick) {
+        android.os.Build.VERSION.SDK_INT < 33 ||
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+    }
+    Spacer(modifier = Modifier.height(16.dp))
+    Text(text = "行为学习记账（M5 第一版）")
+    Text(
+        text = "待确认 ${status.behaviorPendingCount} · 人工确认 ${status.behaviorConfirmedCount} · " +
+            "自动记账 ${status.behaviorAutoRecordedCount} · 自动模板 ${status.behaviorAutoTemplateCount}"
+    )
+    Text(
+        text = "无障碍权限：${if (accessibility.permissionEnabled) "已开启" else "未开启"} · " +
+            "服务：${if (accessibility.serviceConnected) "已连接" else "未连接"} · " +
+            "确认通知：${if (notificationGranted) "可发送" else "未授权"}"
+    )
+    Text(text = "只保留 10 秒内存事件滑窗，不截图、不保存页面原文。连续 5 次确认且零否定的同类行为才允许自动记账。")
+    if (!accessibility.permissionEnabled) {
+        Button(onClick = onOpenAccessibilitySettings, modifier = Modifier.fillMaxWidth()) {
+            Text("开启行为学习无障碍服务")
+        }
+    }
+    if (!notificationGranted) {
+        Button(onClick = onRequestNotificationPermission, modifier = Modifier.fillMaxWidth()) {
+            Text("允许弹出付款确认通知")
+        }
+    }
+    if (BuildConfig.DEBUG) {
+        Button(
+            onClick = { LedgerKernel.createDebugBehaviorCandidate() },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("生成 0.01 元本地测试候选")
+        }
+        Text(text = "测试候选默认只进入待确认，不会自行记成成功；其模板与真实 App 隔离。")
+    }
+    if (status.behaviorCandidates.isEmpty()) {
+        Text(text = "尚无行为候选。开启服务后，明确成功终态会出现在这里。")
+    } else {
+        status.behaviorCandidates.take(30).forEach { candidate ->
+            BehaviorCandidateCard(candidate)
+        }
+    }
+}
+
+@Composable
+private fun BehaviorCandidateCard(candidate: BehaviorCandidateEntity) {
+    var amountText by remember(candidate.id, candidate.amountCents) {
+        mutableStateOf(candidate.amountCents?.let { "%d.%02d".format(it / 100, kotlin.math.abs(it % 100)) }.orEmpty())
+    }
+    var purpose by remember(candidate.id, candidate.purpose) { mutableStateOf(candidate.purpose.orEmpty()) }
+    val parsedAmount = remember(amountText) { parseAmountCents(amountText) }
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(text = "${if (candidate.kind == BehaviorKind.REFUND) "退款" else "付款"} · ${behaviorStateLabels[candidate.state]}")
+            Text(text = "来源：${candidate.packageName} · 置信度 ${candidate.confidence}%")
+            Text(text = "发生时间：${formatEventTime(candidate.occurredAtMs)}")
+            if (candidate.ambiguousRepeatCount > 0) {
+                Text(text = "警告：又收到 ${candidate.ambiguousRepeatCount} 次无法区分的相同成功终态；已保留审计缺口，请核对是否存在另一笔同额交易。")
+            }
+            if (candidate.state == BehaviorCandidateState.PENDING) {
+                OutlinedTextField(
+                    value = amountText,
+                    onValueChange = { amountText = it.take(12) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("金额（元）") },
+                    isError = amountText.isNotBlank() && parsedAmount == null,
+                )
+                OutlinedTextField(
+                    value = purpose,
+                    onValueChange = { purpose = it.take(80) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("用途（可选）") },
+                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Button(
+                        onClick = {
+                            LedgerKernel.applyBehaviorDecision(
+                                candidate.id,
+                                BehaviorDecision.CONFIRM_PAYMENT,
+                                parsedAmount,
+                                purpose,
+                            )
+                        },
+                        enabled = parsedAmount != null,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("确认付款") }
+                    Button(
+                        onClick = {
+                            LedgerKernel.applyBehaviorDecision(
+                                candidate.id,
+                                BehaviorDecision.CONFIRM_REFUND,
+                                parsedAmount,
+                                purpose,
+                            )
+                        },
+                        enabled = parsedAmount != null,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("确认退款") }
+                }
+                TextButton(
+                    onClick = { LedgerKernel.applyBehaviorDecision(candidate.id, BehaviorDecision.REJECT) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("不是付款/退款，排除并降低模板置信度") }
+            } else {
+                candidate.amountCents?.let { Text(text = "金额：¥%d.%02d".format(it / 100, kotlin.math.abs(it % 100))) }
+                candidate.purpose?.let { Text(text = "用途：$it") }
+                if (candidate.state == BehaviorCandidateState.AUTO_RECORDED) {
+                    Button(
+                        onClick = { LedgerKernel.applyBehaviorDecision(candidate.id, BehaviorDecision.UNDO_AUTO) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("撤销这笔自动记账并停用该模板") }
+                }
+            }
+        }
+    }
+}
+
+private fun parseAmountCents(input: String): Long? = runCatching {
+    BigDecimal(input.trim())
+        .setScale(2, RoundingMode.UNNECESSARY)
+        .movePointRight(2)
+        .longValueExact()
+        .takeIf { it > 0 }
+}.getOrNull()
 
 @Composable
 private fun KernelStatusSection() {

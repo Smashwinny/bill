@@ -21,8 +21,8 @@ android {
         applicationId = "com.hulk.pillsapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "1.4.0-m4-coverage-import"
+        versionCode = 12
+        versionName = "1.5.0-m5-behavior-learning"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(
@@ -54,6 +54,8 @@ android {
         checkReleaseBuilds = false
         abortOnError = true
     }
+
+    sourceSets.getByName("androidTest").assets.srcDir("$projectDir/schemas")
 }
 
 ksp {

@@ -42,6 +42,11 @@ object DbCrypto {
         return encoded.toByteArray(Charsets.UTF_8)
     }
 
+    /** M5 崩溃恢复待办使用同一 Keystore 主密钥；文件只包含随机 IV + 密文。 */
+    fun encryptLocalArtifact(plain: ByteArray): ByteArray = wrap(plain)
+
+    fun decryptLocalArtifact(encrypted: ByteArray): ByteArray = unwrap(encrypted)
+
     private fun keystoreKey(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }

@@ -10,6 +10,10 @@ import androidx.room.RoomDatabase
         CanonicalTransactionEntity::class,
         LedgerEntryEntity::class,
         EvidenceLinkEntity::class,
+        BehaviorSignalReceiptEntity::class,
+        BehaviorCandidateEntity::class,
+        BehaviorTemplateEntity::class,
+        BehaviorDecisionEntity::class,
         DebtAccountEntity::class,
         DebtAccountEvidenceEntity::class,
         AccountDiscoveryScanEntity::class,
@@ -21,12 +25,13 @@ import androidx.room.RoomDatabase
         StatementRowEntity::class,
         StatementImportRowEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class LedgerDatabase : RoomDatabase() {
     abstract fun observationDao(): ObservationDao
     abstract fun canonicalDao(): CanonicalDao
+    abstract fun behaviorDao(): BehaviorDao
     abstract fun debtAccountDao(): DebtAccountDao
     abstract fun coverageGapDao(): CoverageGapDao
     abstract fun notificationRemovalDao(): NotificationRemovalDao
@@ -192,5 +197,62 @@ val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_statement_import_row_row_id` " +
                 "ON `statement_import_row` (`row_id`)"
         )
+    }
+}
+
+val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `behavior_signal_receipt` (" +
+                "`occurrence_id` TEXT NOT NULL, `observation_id` INTEGER NOT NULL, " +
+                "`ambiguous_repeat` INTEGER NOT NULL, `applied_at_ms` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`occurrence_id`), " +
+                "FOREIGN KEY(`observation_id`) REFERENCES `raw_observation`(`id`) " +
+                "ON UPDATE NO ACTION ON DELETE NO ACTION)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_behavior_signal_receipt_observation_id` " +
+                "ON `behavior_signal_receipt` (`observation_id`)"
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `behavior_template` (" +
+                "`template_key` TEXT NOT NULL, `package_name` TEXT NOT NULL, `kind` TEXT NOT NULL, " +
+                "`route_signature` TEXT NOT NULL, `app_version_code` INTEGER NOT NULL, " +
+                "`positive_count` INTEGER NOT NULL, `negative_count` INTEGER NOT NULL, " +
+                "`consecutive_positive_count` INTEGER NOT NULL, `auto_enabled` INTEGER NOT NULL, " +
+                "`created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`template_key`))"
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `behavior_candidate` (" +
+                "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `public_id` TEXT NOT NULL, " +
+                "`observation_id` INTEGER NOT NULL, `canonical_tx_id` INTEGER NOT NULL, " +
+                "`template_key` TEXT NOT NULL, `package_name` TEXT NOT NULL, `kind` TEXT NOT NULL, " +
+                "`amount_cents` INTEGER, `currency` TEXT NOT NULL, `occurred_at_ms` INTEGER NOT NULL, " +
+                "`confidence` INTEGER NOT NULL, `consumed_intent` INTEGER NOT NULL, " +
+                "`route_signature` TEXT NOT NULL, `app_version_code` INTEGER NOT NULL, " +
+                "`ambiguous_repeat_count` INTEGER NOT NULL, " +
+                "`feature_summary` TEXT NOT NULL, `purpose` TEXT, `state` TEXT NOT NULL, " +
+                "`created_at_ms` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, " +
+                "`decided_at_ms` INTEGER, " +
+                "FOREIGN KEY(`observation_id`) REFERENCES `raw_observation`(`id`) " +
+                "ON UPDATE NO ACTION ON DELETE NO ACTION, " +
+                "FOREIGN KEY(`canonical_tx_id`) REFERENCES `canonical_transaction`(`id`) " +
+                "ON UPDATE NO ACTION ON DELETE NO ACTION)"
+        )
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_behavior_candidate_public_id` ON `behavior_candidate` (`public_id`)")
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_behavior_candidate_observation_id` ON `behavior_candidate` (`observation_id`)")
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_behavior_candidate_canonical_tx_id` ON `behavior_candidate` (`canonical_tx_id`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_behavior_candidate_template_key` ON `behavior_candidate` (`template_key`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_behavior_candidate_state` ON `behavior_candidate` (`state`)")
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `behavior_decision` (" +
+                "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `candidate_id` INTEGER NOT NULL, " +
+                "`decision` TEXT NOT NULL, `actor` TEXT NOT NULL, `kind` TEXT NOT NULL, " +
+                "`amount_cents` INTEGER, `purpose` TEXT, `created_at_ms` INTEGER NOT NULL, " +
+                "FOREIGN KEY(`candidate_id`) REFERENCES `behavior_candidate`(`id`) " +
+                "ON UPDATE NO ACTION ON DELETE NO ACTION)"
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_behavior_decision_candidate_id` ON `behavior_decision` (`candidate_id`)")
     }
 }

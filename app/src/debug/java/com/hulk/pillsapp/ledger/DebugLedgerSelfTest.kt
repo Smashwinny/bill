@@ -37,10 +37,13 @@ object DebugLedgerSelfTest {
                 statementArtifactChunkBoundaryWorksOnDevice()
                 phase = "statement_import"
                 statementImportIsAuditableAndDoesNotPostLedger(db)
+                phase = "behavior_learning"
+                behaviorEpisodeTrackerPreservesAmbiguity()
+                behaviorCandidatesRemainIndependentAndDecisionsAreIdempotent(db)
                 phase = "complete"
                 report.writeText(
                     "result=PASS\n" +
-                        "tests=revision_one_candidate,duplicate_counter,gap_close,debt_discovery_audit,debt_discovery_idempotence,no_false_baseline,parser_upgrade_retires_wrong_tail,statement_xlsx_android,statement_artifact_256k,statement_import_idempotence,statement_parser_reparse,no_row_occurrence_merge,no_import_auto_posting\n" +
+                        "tests=revision_one_candidate,duplicate_counter,gap_close,debt_discovery_audit,debt_discovery_idempotence,no_false_baseline,parser_upgrade_retires_wrong_tail,statement_xlsx_android,statement_artifact_256k,statement_import_idempotence,statement_parser_reparse,no_row_occurrence_merge,no_import_auto_posting,behavior_episode_once,behavior_ambiguous_repeat,behavior_independent_clips,behavior_idempotent_transition,behavior_strict_auto_gate\n" +
                         "at_ms=${System.currentTimeMillis()}\n"
                 )
             } finally {
@@ -281,5 +284,107 @@ object DebugLedgerSelfTest {
         check(hashes.size == 2)
         check(hashes.all { it.length == 64 })
         check(hashes[0] != hashes[1])
+    }
+
+    private fun behaviorCandidatesRemainIndependentAndDecisionsAreIdempotent(db: LedgerDatabase) {
+        val now = System.currentTimeMillis()
+        var template = BehaviorTemplateEntity(
+            templateKey = "self-test-template",
+            packageName = "com.example.selftest.pay",
+            kind = BehaviorKind.PAYMENT,
+            routeSignature = "self-test-route",
+            appVersionCode = 1,
+            positiveCount = 0,
+            negativeCount = 0,
+            consecutivePositiveCount = 0,
+            autoEnabled = false,
+            createdAtMs = now,
+            updatedAtMs = now,
+        )
+        db.behaviorDao().insertTemplateIgnore(template)
+        repeat(4) { template = BehaviorLearningPolicy.afterPositive(template, now + it) }
+        check(!template.autoEnabled)
+        template = BehaviorLearningPolicy.afterPositive(template, now + 5)
+        check(template.autoEnabled)
+
+        fun addClip(key: String): Long {
+            val observationId = db.observationDao().ingest(
+                observation("支付成功 0.01元", key).copy(
+                    source = ObservationSource.A11Y,
+                    sourceKey = key,
+                    packageName = "com.example.selftest.pay",
+                    capturePath = CapturePath.A11Y,
+                    parseState = ParseState.PARSED,
+                )
+            ).id
+            val canonicalId = db.canonicalDao().createCandidateWithEvidence(
+                CanonicalTransactionEntity(
+                    strongIdHash = null,
+                    type = TxType.PAYMENT,
+                    status = TxStatus.DETECTED,
+                    amountCents = 1,
+                    merchantHint = null,
+                    occurredAtMs = now,
+                    backfilledFrom = null,
+                    createdAtMs = now,
+                ),
+                observationId,
+                "A11Y_BEHAVIOR_CLIP",
+                now,
+            )
+            return db.behaviorDao().insertCandidateIgnore(
+                BehaviorCandidateEntity(
+                    publicId = key,
+                    observationId = observationId,
+                    canonicalTxId = canonicalId,
+                    templateKey = template.templateKey,
+                    packageName = template.packageName,
+                    kind = BehaviorKind.PAYMENT,
+                    amountCents = 1,
+                    occurredAtMs = now,
+                    confidence = 95,
+                    consumedIntent = true,
+                    routeSignature = "self-test-route",
+                    appVersionCode = 1,
+                    ambiguousRepeatCount = 0,
+                    featureSummary = "self-test",
+                    purpose = null,
+                    state = BehaviorCandidateState.PENDING,
+                    createdAtMs = now,
+                    updatedAtMs = now,
+                    decidedAtMs = null,
+                )
+            )
+        }
+        val first = addClip("self-test-behavior-1")
+        addClip("self-test-behavior-2")
+        check(db.behaviorDao().countByState(BehaviorCandidateState.PENDING) == 2L)
+        val accepted = BehaviorDecisionEngine.apply(
+            db, first, BehaviorDecision.CONFIRM_PAYMENT, 1, "self-test", now + 1,
+        )
+        val repeated = BehaviorDecisionEngine.apply(
+            db, first, BehaviorDecision.CONFIRM_PAYMENT, 1, "self-test", now + 2,
+        )
+        check(accepted.changed)
+        check(!repeated.changed)
+        check(db.behaviorDao().countDecisions() == 1L)
+        check(accepted.candidate?.let { db.canonicalDao().findById(it.canonicalTxId)?.status } == TxStatus.SUCCESS)
+        check(db.behaviorDao().countOrphans() == 0L)
+    }
+
+    private fun behaviorEpisodeTrackerPreservesAmbiguity() {
+        var next = 0
+        val tracker = BehaviorEpisodeTracker { "self-episode-${++next}" }
+        tracker.onContext("com.example.selftest.pay", 1, 100)
+        tracker.onIntent("com.example.selftest.pay", 100, "route", 1)
+        val first = tracker.onTerminal("com.example.selftest.pay", 1, "PAYMENT|1", 200, 1)
+        val repeated = tracker.onTerminal("com.example.selftest.pay", 1, "PAYMENT|1", 300, 1)
+        tracker.onIntent("com.example.selftest.pay", 400, "route", 1)
+        val second = tracker.onTerminal("com.example.selftest.pay", 1, "PAYMENT|1", 500, 1)
+        check(first.consumedIntent)
+        check(repeated.ambiguousRepeat)
+        check(repeated.clipId == first.clipId)
+        check(second.consumedIntent)
+        check(second.clipId != first.clipId)
     }
 }

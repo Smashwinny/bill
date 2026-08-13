@@ -88,4 +88,6 @@
     <string name="m4_import_success">导入成功：逐行保留 %1$d 个源行证据。未跨文件自动合并，尚未进入正式账。</string>
     <string name="m4_close_result">关闭本次结果</string>
     <string name="m4_import_history">不可变解析批次审计历史</string>
+    <string name="m5_accessibility_service_name">自动账本行为学习</string>
+    <string name="m5_accessibility_description">通过最近 10 秒的轻量界面事件识别可能的成功付款和退款；不截图、不读取整页内容。</string>
 </resources>

@@ -31,7 +31,7 @@ enum class CapturePath {
 enum class ParseState { PENDING_PARSE, PARSED, PARSE_FAILED, IGNORED_NON_FINANCIAL }
 
 /** T00 §2 交易状态机；REFUNDED 是独立事件不是状态，见 refund 侧建模（M4 完善）。 */
-enum class TxStatus { DETECTED, SUCCESS, PARTIALLY_REFUNDED, FULLY_REFUNDED, REVERSED }
+enum class TxStatus { DETECTED, SUCCESS, PARTIALLY_REFUNDED, FULLY_REFUNDED, REVERSED, DISCARDED }
 
 enum class TxType { PAYMENT, REFUND, TRANSFER, FEE, REVERSAL, INCOME, UNKNOWN }
 
@@ -64,10 +64,20 @@ enum class StatementImportStatus {
 
 enum class StatementDirection { OUT, IN, NEUTRAL, UNKNOWN }
 
+enum class BehaviorKind { PAYMENT, REFUND }
+
+enum class BehaviorCandidateState { PENDING, CONFIRMED, REJECTED, AUTO_RECORDED, UNDONE }
+
+enum class BehaviorDecision { CONFIRM_PAYMENT, CONFIRM_REFUND, REJECT, AUTO_RECORD, UNDO_AUTO }
+
+enum class BehaviorDecisionActor { USER, MODEL }
+
 object GapDetectors {
     const val LISTENER_CALLBACK = "LISTENER_CALLBACK"
     const val BOOT_CHECK = "BOOT_CHECK"
     const val HEALTH_CHECK = "HEALTH_CHECK"
+    const val A11Y_SERVICE = "A11Y_SERVICE"
+    const val A11Y_AMBIGUOUS_REPEAT = "A11Y_AMBIGUOUS_REPEAT"
 }
 
 @Entity(
@@ -162,6 +172,123 @@ data class EvidenceLinkEntity(
     @ColumnInfo(name = "canonical_tx_id") val canonicalTxId: Long,
     /** STRONG_ID / STRONG_ID_MERGED / WEAK_OBSERVATION_ONLY / SET_MATCH（M4）。 */
     @ColumnInfo(name = "match_reason") val matchReason: String,
+    @ColumnInfo(name = "created_at_ms") val createdAtMs: Long,
+)
+
+/**
+ * 每个无障碍终态回调的不可变应用收据。outbox 在数据库提交后、文件删除前崩溃时，
+ * occurrence_id 的主键保证整次重放（包括歧义计数和缺口副作用）只应用一次。
+ */
+@Entity(
+    tableName = "behavior_signal_receipt",
+    foreignKeys = [
+        ForeignKey(
+            entity = RawObservationEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["observation_id"],
+            onDelete = ForeignKey.NO_ACTION,
+        ),
+    ],
+    indices = [Index(value = ["observation_id"])],
+)
+data class BehaviorSignalReceiptEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "occurrence_id") val occurrenceId: String,
+    @ColumnInfo(name = "observation_id") val observationId: Long,
+    @ColumnInfo(name = "ambiguous_repeat") val ambiguousRepeat: Boolean,
+    @ColumnInfo(name = "applied_at_ms") val appliedAtMs: Long,
+)
+
+/**
+ * M5 行为片段。原始页面文本和截图永不落库；这里只保存脱敏事件摘要与用户决定。
+ * observation/canonical 一一对应，确保一次行为确认只改变已有候选，不额外复制交易。
+ */
+@Entity(
+    tableName = "behavior_candidate",
+    foreignKeys = [
+        ForeignKey(
+            entity = RawObservationEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["observation_id"],
+            onDelete = ForeignKey.NO_ACTION,
+        ),
+        ForeignKey(
+            entity = CanonicalTransactionEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["canonical_tx_id"],
+            onDelete = ForeignKey.NO_ACTION,
+        ),
+    ],
+    indices = [
+        Index(value = ["public_id"], unique = true),
+        Index(value = ["observation_id"], unique = true),
+        Index(value = ["canonical_tx_id"], unique = true),
+        Index(value = ["template_key"]),
+        Index(value = ["state"]),
+    ],
+)
+data class BehaviorCandidateEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "public_id") val publicId: String,
+    @ColumnInfo(name = "observation_id") val observationId: Long,
+    @ColumnInfo(name = "canonical_tx_id") val canonicalTxId: Long,
+    @ColumnInfo(name = "template_key") val templateKey: String,
+    @ColumnInfo(name = "package_name") val packageName: String,
+    val kind: BehaviorKind,
+    @ColumnInfo(name = "amount_cents") val amountCents: Long?,
+    val currency: String = "CNY",
+    @ColumnInfo(name = "occurred_at_ms") val occurredAtMs: Long,
+    val confidence: Int,
+    @ColumnInfo(name = "consumed_intent") val consumedIntent: Boolean,
+    @ColumnInfo(name = "route_signature") val routeSignature: String,
+    @ColumnInfo(name = "app_version_code") val appVersionCode: Long,
+    @ColumnInfo(name = "ambiguous_repeat_count") val ambiguousRepeatCount: Long,
+    @ColumnInfo(name = "feature_summary") val featureSummary: String,
+    val purpose: String?,
+    val state: BehaviorCandidateState,
+    @ColumnInfo(name = "created_at_ms") val createdAtMs: Long,
+    @ColumnInfo(name = "updated_at_ms") val updatedAtMs: Long,
+    @ColumnInfo(name = "decided_at_ms") val decidedAtMs: Long?,
+)
+
+/** 只按脱敏事件序列摘要学习；模型自己的决定永不反向训练模板。 */
+@Entity(tableName = "behavior_template")
+data class BehaviorTemplateEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "template_key") val templateKey: String,
+    @ColumnInfo(name = "package_name") val packageName: String,
+    val kind: BehaviorKind,
+    @ColumnInfo(name = "route_signature") val routeSignature: String,
+    @ColumnInfo(name = "app_version_code") val appVersionCode: Long,
+    @ColumnInfo(name = "positive_count") val positiveCount: Int,
+    @ColumnInfo(name = "negative_count") val negativeCount: Int,
+    @ColumnInfo(name = "consecutive_positive_count") val consecutivePositiveCount: Int,
+    @ColumnInfo(name = "auto_enabled") val autoEnabled: Boolean,
+    @ColumnInfo(name = "created_at_ms") val createdAtMs: Long,
+    @ColumnInfo(name = "updated_at_ms") val updatedAtMs: Long,
+)
+
+/** 用户/模型决定不可变审计行；候选状态可以更新，但历史决定不覆盖。 */
+@Entity(
+    tableName = "behavior_decision",
+    foreignKeys = [
+        ForeignKey(
+            entity = BehaviorCandidateEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["candidate_id"],
+            onDelete = ForeignKey.NO_ACTION,
+        ),
+    ],
+    indices = [Index(value = ["candidate_id"])],
+)
+data class BehaviorDecisionEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "candidate_id") val candidateId: Long,
+    val decision: BehaviorDecision,
+    val actor: BehaviorDecisionActor,
+    val kind: BehaviorKind,
+    @ColumnInfo(name = "amount_cents") val amountCents: Long?,
+    val purpose: String?,
     @ColumnInfo(name = "created_at_ms") val createdAtMs: Long,
 )
 

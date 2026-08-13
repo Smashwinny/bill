@@ -53,6 +53,8 @@ class NotificationListenerStateTest {
         assertFalse(manifest.contains("android.permission.WRITE_EXTERNAL_STORAGE"))
         assertFalse(manifest.contains("android.permission.READ_EXTERNAL_STORAGE"))
         assertFalse(manifest.contains("android.permission.SYSTEM_ALERT_WINDOW"))
-        assertFalse(manifest.contains("android.permission.BIND_ACCESSIBILITY_SERVICE"))
+        // M5 允许系统绑定专用行为学习服务，但仍禁止录屏/悬浮窗通道。
+        assertTrue(manifest.contains("android.permission.BIND_ACCESSIBILITY_SERVICE"))
+        assertFalse(manifest.contains("android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"))
     }
 }

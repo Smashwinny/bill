@@ -9,6 +9,8 @@ class PillsApp : Application() {
     override fun onCreate() {
         super.onCreate()
         LedgerKernel.init(this)
+        // M5：无障碍回调已 fsync 但尚未来得及入库的脱敏片段在启动时幂等重放。
+        LedgerKernel.drainBehaviorOutbox()
         LedgerKernel.runLegacyMigrationIfNeeded(this)
         // 进程重启兜底：上次被杀时滞留的 PENDING_PARSE 在此续跑（V1.1 §9 用例 14）。
         LedgerKernel.drainPendingParse()

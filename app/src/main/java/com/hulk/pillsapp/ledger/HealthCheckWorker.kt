@@ -7,6 +7,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.hulk.pillsapp.NotificationListenerState
+import com.hulk.pillsapp.BehaviorAccessibilityState
 import java.util.concurrent.TimeUnit
 
 /**
@@ -24,6 +25,13 @@ class HealthCheckWorker(
             LedgerKernel.closeOpenGaps(GapDetectors.HEALTH_CHECK)
         } else {
             LedgerKernel.openGap(GapDetectors.HEALTH_CHECK, "周期健康检查：通知使用权已失效")
+        }
+        if (BehaviorAccessibilityState.isEnabled(applicationContext) &&
+            LedgerKernel.isA11yHeartbeatFresh()
+        ) {
+            LedgerKernel.closeOpenGaps(GapDetectors.A11Y_SERVICE)
+        } else {
+            LedgerKernel.openGap(GapDetectors.A11Y_SERVICE, "周期健康检查：行为学习服务未连接或权限已失效")
         }
         LedgerKernel.markHealthCheck()
         return Result.success()
