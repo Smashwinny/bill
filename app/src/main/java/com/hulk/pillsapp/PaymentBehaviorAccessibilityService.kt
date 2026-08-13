@@ -17,7 +17,14 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
     private val heartbeatHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val heartbeat = object : Runnable {
         override fun run() {
-            LedgerKernel.markA11yHeartbeat()
+            when (BehaviorAccessibilityState.claimCallbackOwner(
+                this@PaymentBehaviorAccessibilityService,
+                this@PaymentBehaviorAccessibilityService,
+            )) {
+                CallbackOwnerAccess.RECOVERED -> LedgerKernel.markA11yConnected()
+                CallbackOwnerAccess.CURRENT -> LedgerKernel.markA11yHeartbeat()
+                CallbackOwnerAccess.STALE -> return
+            }
             heartbeatHandler.postDelayed(this, 15 * 60 * 1000L)
         }
     }
@@ -26,7 +33,7 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        BehaviorAccessibilityState.setConnected(this, true)
+        BehaviorAccessibilityState.registerCallbackOwner(this, this)
         LedgerKernel.markA11yConnected()
         heartbeatHandler.removeCallbacks(heartbeat)
         heartbeatHandler.post(heartbeat)
@@ -34,6 +41,13 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
+        // 包升级时旧 Service.onDestroy 可能晚于新实例的 onServiceConnected；
+        // 事件可认领回调所有权，并只在真正恢复时关闭持久缺口。
+        when (BehaviorAccessibilityState.claimCallbackOwner(this, this)) {
+            CallbackOwnerAccess.RECOVERED -> LedgerKernel.markA11yConnected()
+            CallbackOwnerAccess.CURRENT -> Unit
+            CallbackOwnerAccess.STALE -> return
+        }
         val packageName = event.packageName?.toString().orEmpty()
         if (packageName.isBlank() || packageName == applicationContext.packageName) return
         val now = System.currentTimeMillis()
@@ -118,15 +132,15 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        BehaviorAccessibilityState.setConnected(this, false)
-        heartbeatHandler.removeCallbacks(heartbeat)
-        LedgerKernel.markA11yDisconnected("行为学习无障碍服务已中断")
+        // AccessibilityService.onInterrupt 只要求停止语音/震动等反馈，并不表示解绑。
+        // 本服务没有可中断反馈；在线状态只能由 onDestroy/心跳超时判定。
     }
 
     override fun onDestroy() {
-        BehaviorAccessibilityState.setConnected(this, false)
         heartbeatHandler.removeCallbacks(heartbeat)
-        LedgerKernel.markA11yDisconnected("行为学习无障碍服务已停止")
+        if (BehaviorAccessibilityState.clearCallbackConnected(this, this)) {
+            LedgerKernel.markA11yDisconnected("行为学习无障碍服务已停止")
+        }
         super.onDestroy()
     }
 

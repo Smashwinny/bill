@@ -723,8 +723,7 @@ private fun BehaviorLearningSection(
             "自动记账 ${status.behaviorAutoRecordedCount} · 自动模板 ${status.behaviorAutoTemplateCount}"
     )
     Text(
-        text = "无障碍权限：${if (accessibility.permissionEnabled) "已开启" else "未开启"} · " +
-            "服务：${if (accessibility.serviceConnected) "已连接" else "未连接"} · " +
+        text = "无障碍后台采集：${if (accessibility.permissionEnabled) "已启用（心跳由内核监控）" else "未启用"} · " +
             "确认通知：${if (notificationGranted) "可发送" else "未授权"}"
     )
     Text(text = "只保留 10 秒内存事件滑窗，不截图、不保存页面原文。连续 5 次确认且零否定的同类行为才允许自动记账。")

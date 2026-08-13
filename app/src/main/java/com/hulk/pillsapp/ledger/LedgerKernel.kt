@@ -52,6 +52,7 @@ data class KernelStatus(
     val behaviorSignalReceiptCount: Long = 0,
     val orphanBehaviorSignalReceiptCount: Long = 0,
     val orphanBehaviorCount: Long = 0,
+    val a11yHeartbeatFresh: Boolean = false,
     val behaviorCandidates: List<BehaviorCandidateEntity> = emptyList(),
     val sourceCoverage: List<SourceCoverageItem> = emptyList(),
     val statementImports: List<StatementImportSummary> = emptyList(),
@@ -524,6 +525,8 @@ object LedgerKernel {
     }
 
     fun markA11yDisconnected(note: String) {
+        appContext?.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            ?.edit()?.putLong(PREF_LAST_A11Y_HEARTBEAT_AT, 0L)?.apply()
         behaviorExecutor.submit {
             runCatching {
                 val dao = requireDb().coverageGapDao()
@@ -973,6 +976,7 @@ object LedgerKernel {
             behaviorSignalReceiptCount = db.behaviorDao().countSignalReceipts(),
             orphanBehaviorSignalReceiptCount = db.behaviorDao().countOrphanSignalReceipts(),
             orphanBehaviorCount = db.behaviorDao().countOrphans(),
+            a11yHeartbeatFresh = isA11yHeartbeatFresh(),
             behaviorCandidates = db.behaviorDao().listRecent(),
             sourceCoverage = sourceCoverage,
             statementImports = statementImports,
@@ -993,6 +997,10 @@ object LedgerKernel {
                     appendLine("candidates=${snapshot.candidateCount}")
                     appendLine("pending_parse=${snapshot.pendingParseCount}")
                     appendLine("open_gaps=${snapshot.openGapCount}")
+                    snapshot.openGaps.forEachIndexed { index, gap ->
+                        appendLine("open_gap_${index}_detector=${gap.detector}")
+                    }
+                    appendLine("a11y_heartbeat_fresh=${snapshot.a11yHeartbeatFresh}")
                     appendLine("debt_accounts=${snapshot.debtAccountCount}")
                     appendLine("debt_suspected=${snapshot.suspectedDebtCount}")
                     appendLine("debt_identified=${snapshot.identifiedDebtCount}")
