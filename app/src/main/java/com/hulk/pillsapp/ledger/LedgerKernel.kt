@@ -420,7 +420,7 @@ object LedgerKernel {
             pendingParseCount = db.observationDao().countPendingParse(),
             openGapCount = db.coverageGapDao().countOpen(),
             openGaps = db.coverageGapDao().openGaps(),
-            debtAccountCount = db.debtAccountDao().countAll(),
+            debtAccountCount = db.debtAccountDao().countVisible(),
             suspectedDebtCount = db.debtAccountDao().countByStatus(DebtAccountStatus.SUSPECTED),
             identifiedDebtCount = db.debtAccountDao().countByStatus(DebtAccountStatus.IDENTIFIED),
             baselinedDebtCount = db.debtAccountDao().countByStatus(DebtAccountStatus.BASELINED),

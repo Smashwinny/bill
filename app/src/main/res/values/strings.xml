@@ -70,7 +70,8 @@
     <string name="m3_discovery_progress_format">历史修订扫描 %1$d/%2$d · 待扫描 %3$d · 失败 %4$d</string>
     <string name="m3_repayment_pending_format">缺少权威余额基线的还款线索：%1$d 条</string>
     <string name="m3_candidate_notice">候选只表示检测到线索，不等于已核验欠款；额度、应还提醒和还款金额不会自动写成负债余额。</string>
+    <string name="m3_source_limit_notice">当前列表只是从已捕获的通知和短信中自动发现，不是完整负债清单；没有出现明确账单或还款语义的账户不会猜测补齐。只有原文明确标注时才显示“明确尾号”。</string>
     <string name="m3_rescan">重新扫描负债线索</string>
     <string name="m3_no_candidates">暂未发现负债账户线索</string>
-    <string name="m3_more_candidates">另有 %1$d 个候选未展开</string>
+    <string name="m3_more_candidates">展开其余 %1$d 个候选</string>
 </resources>

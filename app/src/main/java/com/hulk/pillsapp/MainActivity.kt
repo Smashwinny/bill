@@ -384,6 +384,7 @@ private fun AppHome(
 @Composable
 private fun DebtDiscoverySection() {
     val status by LedgerKernel.status.collectAsState()
+    var showAllCandidates by remember { mutableStateOf(false) }
     Spacer(modifier = Modifier.height(16.dp))
     Text(text = stringResource(R.string.m3_debt_section_title))
     Text(
@@ -411,6 +412,7 @@ private fun DebtDiscoverySection() {
         )
     )
     Text(text = stringResource(R.string.m3_candidate_notice))
+    Text(text = stringResource(R.string.m3_source_limit_notice))
     Button(
         onClick = { LedgerKernel.runDebtDiscovery() },
         modifier = Modifier.fillMaxWidth(),
@@ -420,7 +422,12 @@ private fun DebtDiscoverySection() {
     if (status.debtAccounts.isEmpty()) {
         Text(text = stringResource(R.string.m3_no_candidates))
     } else {
-        status.debtAccounts.take(20).forEach { account ->
+        val displayedAccounts = if (showAllCandidates) {
+            status.debtAccounts
+        } else {
+            status.debtAccounts.take(20)
+        }
+        displayedAccounts.forEach { account ->
             Card(
                 colors = CardDefaults.cardColors(),
                 modifier = Modifier
@@ -437,8 +444,13 @@ private fun DebtDiscoverySection() {
                 }
             }
         }
-        if (status.debtAccounts.size > 20) {
-            Text(text = stringResource(R.string.m3_more_candidates, status.debtAccounts.size - 20))
+        if (!showAllCandidates && status.debtAccounts.size > 20) {
+            Button(
+                onClick = { showAllCandidates = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(text = stringResource(R.string.m3_more_candidates, status.debtAccounts.size - 20))
+            }
         }
     }
 }

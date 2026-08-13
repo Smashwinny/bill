@@ -21,9 +21,10 @@ object DebugLedgerSelfTest {
                 duplicateOnlyIncrementsCounter(db)
                 closingGapLeavesNoActiveGap(db)
                 debtDiscoveryIsAuditableAndIdempotent(db)
+                parserUpgradeRetiresWrongTailWithoutDeletingAudit(db)
                 report.writeText(
                     "result=PASS\n" +
-                        "tests=revision_one_candidate,duplicate_counter,gap_close,debt_discovery_audit,debt_discovery_idempotence,no_false_baseline\n" +
+                        "tests=revision_one_candidate,duplicate_counter,gap_close,debt_discovery_audit,debt_discovery_idempotence,no_false_baseline,parser_upgrade_retires_wrong_tail\n" +
                         "at_ms=${System.currentTimeMillis()}\n"
                 )
             } finally {
@@ -116,5 +117,66 @@ object DebugLedgerSelfTest {
                 DebtAccountStatus.BASELINED,
             ) == 0L
         )
+    }
+
+    private fun parserUpgradeRetiresWrongTailWithoutDeletingAudit(db: LedgerDatabase) {
+        val now = System.currentTimeMillis()
+        val raw = observation("信用卡2026年账单，本期应还100.00元", "upgrade-tail")
+            .copy(sourceKey = "0:upgrade-tail", packageName = "95555")
+        val observationId = db.observationDao().ingest(raw).id
+        val oldAccountId = db.debtAccountDao().insertAccountIgnore(
+            DebtAccountEntity(
+                publicId = "self-test-old-tail",
+                clusterHash = "old-tail-cluster",
+                identityHash = null,
+                product = DebtProduct.CREDIT_CARD,
+                institutionCode = "CMB",
+                institutionLabel = "招商银行",
+                displayLabel = "招商银行信用卡 ••2026",
+                maskedSuffix = "2026",
+                userHandle = 0,
+                status = DebtAccountStatus.SUSPECTED,
+                confidence = 45,
+                lastEventKind = DebtEventKind.BILL_NOTICE,
+                lastEvidenceStrength = DebtEvidenceStrength.OBSERVATIONAL,
+                dueDayOfMonth = null,
+                firstSeenAtMs = now,
+                lastSeenAtMs = now,
+                createdAtMs = now,
+                updatedAtMs = now,
+            )
+        )
+        db.debtAccountDao().insertEvidence(
+            DebtAccountEvidenceEntity(
+                observationId = observationId,
+                accountId = oldAccountId,
+                contentHash = "upgrade-tail",
+                parserVersion = 1,
+                signalFingerprint = "old-tail-signal",
+                isCurrent = true,
+                eventKind = DebtEventKind.BILL_NOTICE,
+                strength = DebtEvidenceStrength.OBSERVATIONAL,
+                amountRole = DebtAmountRole.CURRENT_DUE,
+                amountCents = 10_000,
+                dueDayOfMonth = null,
+                observedAtMs = now,
+                createdAtMs = now,
+            )
+        )
+        db.debtAccountDao().insertScan(
+            AccountDiscoveryScanEntity(
+                observationId = observationId,
+                contentHash = "upgrade-tail",
+                parserVersion = 1,
+                isCurrent = true,
+                result = DiscoveryScanResult.MATCHED,
+                scannedAtMs = now,
+            )
+        )
+
+        check(DebtAccountDiscoverer.drain(db, ::sha256Hex) > 0)
+        check(db.debtAccountDao().findById(oldAccountId)?.status == DebtAccountStatus.DORMANT)
+        check(db.debtAccountDao().countEvidenceHistoryForObservation(observationId) == 2L)
+        check(db.debtAccountDao().listVisible().none { it.id == oldAccountId })
     }
 }

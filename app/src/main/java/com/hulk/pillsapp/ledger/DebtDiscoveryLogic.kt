@@ -4,7 +4,7 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 
 /** M3 负债账户发现纯逻辑。结果只能建立候选账户，不能直接形成正式消费或负债余额。 */
-const val DEBT_DISCOVERY_PARSER_VERSION = 1
+const val DEBT_DISCOVERY_PARSER_VERSION = 2
 
 enum class DebtProduct {
     HUABEI,
@@ -15,6 +15,7 @@ enum class DebtProduct {
     DOUYIN_MONTHLY,
     CREDIT_CARD,
     CONSUMER_LOAN,
+    GENERIC_LIABILITY,
 }
 
 enum class DebtAccountStatus {
@@ -90,7 +91,11 @@ object DebtSignalParser {
         Regex("美团月付") to DebtProduct.MEITUAN_MONTHLY,
         Regex("抖音月付") to DebtProduct.DOUYIN_MONTHLY,
         Regex("信用卡|贷记卡") to DebtProduct.CREDIT_CARD,
-        Regex("消费贷|贷款|借款|房贷|车贷|按揭|剩余本金|应还本金") to DebtProduct.CONSUMER_LOAN,
+        Regex(
+            "京东金条|美团借钱|抖音放心借|分期乐|360借条|度小满|有钱花|" +
+                "招联(?:金融|好期贷)?|好期贷|安逸花|拿去花|任性付|唯品花|还呗|小赢卡贷|" +
+                "消费贷|贷款|借款|房贷|车贷|按揭|剩余本金|应还本金",
+        ) to DebtProduct.CONSUMER_LOAN,
     )
 
     private val institutions = listOf(
@@ -109,18 +114,39 @@ object DebtSignalParser {
         InstitutionRule("CEB", "光大银行", Regex("光大银行|光大|95595")),
         InstitutionRule("HXB", "华夏银行", Regex("华夏银行|华夏|95577")),
         InstitutionRule("CGB", "广发银行", Regex("广发银行|广发|95508")),
+        InstitutionRule("FENQILE", "分期乐", Regex("分期乐")),
+        InstitutionRule("QIHOO360", "360借条", Regex("360借条")),
+        InstitutionRule("DUXIAOMAN", "度小满", Regex("度小满|有钱花")),
+        InstitutionRule("ZHAOLIAN", "招联金融", Regex("招联|好期贷")),
+        InstitutionRule("MAS", "马上消费金融", Regex("马上消费|安逸花")),
+        InstitutionRule("CTRIP", "携程金融", Regex("携程|拿去花")),
+        InstitutionRule("SUNING", "苏宁金融", Regex("苏宁|任性付")),
+        InstitutionRule("VIP", "唯品会", Regex("唯品会|唯品花")),
+        InstitutionRule("DIDI", "滴滴金融", Regex("滴滴金融|滴滴借钱")),
+        InstitutionRule("XIAOYING", "小赢科技", Regex("小赢|小赢卡贷")),
+        InstitutionRule("HAIBEI", "还呗", Regex("还呗")),
+        InstitutionRule("JD", "京东", Regex("京东|金条")),
+        InstitutionRule("MEITUAN", "美团", Regex("美团")),
+        InstitutionRule("DOUYIN", "抖音", Regex("抖音|放心借")),
     )
 
     private val accountTailPatterns = listOf(
-        Regex("(?:尾号|末四位|后四位|卡号后4位|卡号后四位)[^0-9\\n]{0,8}([0-9]{4})(?![0-9])"),
-        Regex("(?:信用卡|贷记卡)[^0-9\\n]{0,10}([0-9]{4})(?![0-9])"),
+        Regex(
+            "(?:信用卡|贷记卡)(?:卡号)?[^\\n]{0,4}" +
+                "(?:尾号|末四位|后四位|尾数(?:为)?)[^0-9\\n]{0,3}([0-9]{4})(?![0-9])",
+        ),
+        Regex(
+            "(?:尾号|末四位|后四位|尾数(?:为)?)[^0-9\\n]{0,3}" +
+                "([0-9]{4})(?![0-9])\\s*的?(?:信用卡|贷记卡)",
+        ),
     )
     private val maskedTailPattern = Regex(
-        "(?:信用卡|贷记卡|银行卡|卡号|账户)[^\\n]{0,12}[*•·]{2,}([0-9]{4})(?![0-9])",
+        "(?:信用卡|贷记卡)(?:卡号)?" +
+            "[\\s：:（(【\\[-]{0,6}[*•·xX]{2,}([0-9]{4})(?![0-9])",
     )
 
     private val stableAccountIdPattern = Regex(
-        "(?:合同号|账户号|借据号|账单账户)[：:\\s]*([A-Za-z0-9-]{6,40})",
+        "(?:合同号|借据号|贷款账户|账单账户)[：:\\s为是]*([A-Za-z0-9-]{6,40})",
         RegexOption.IGNORE_CASE,
     )
 
@@ -133,7 +159,20 @@ object DebtSignalParser {
     private val purchaseWords = Regex("消费|付款|支付")
     private val creditLimitWords = Regex("信用额度|授信额度|可用额度|总额度")
     private val marketingWords = Regex("申请|开通|邀您|立即领取|点击领取|最高可借|立即借款|提额|额度提升")
-    private val actualAccountEvent = Regex("消费|账单|本期应还|本月应还|待还|最低还款|还款成功|成功还款|退款|逾期|扣款成功")
+    private val actualAccountEvent = Regex(
+        "消费成功|支付成功|账单已出|本期应还|本月应还|待还|最低还款|" +
+            "还款成功|成功还款|还款已到账|退款成功|逾期|扣款成功",
+    )
+    private val genericLiabilityMarkers = listOf(
+        Regex("本期账单|本期应还|本月应还|应还金额"),
+        Regex("最低还款|最低应还"),
+        Regex("账单日|最后还款日|到期还款日"),
+        Regex("循环利息|罚息|逾期费"),
+        Regex("剩余本金|应还本金|本期本金"),
+    )
+    private val terminalGenericLiabilityEvent = Regex(
+        "还款成功|已成功还款|成功还款|还款已到账|已偿还|贷款扣收成功",
+    )
 
     private val moneyNumber = "([0-9]+(?:,[0-9]{3})*(?:\\.[0-9]{1,2})?)"
     private val generalAmount = Regex("[¥￥]\\s*$moneyNumber|$moneyNumber\\s*元")
@@ -144,16 +183,62 @@ object DebtSignalParser {
         body: String,
         sourceNamespace: String,
         source: ObservationSource,
+    ): DebtDiscoverySignal? = parseAll(title, body, sourceNamespace, source).firstOrNull()
+
+    fun parseAll(
+        title: String,
+        body: String,
+        sourceNamespace: String,
+        source: ObservationSource,
+    ): List<DebtDiscoverySignal> {
+        val text = "$title\n$body"
+        if (!eventContext.containsMatchIn(text)) return emptyList()
+        val matchedProducts = productRules
+            .filter { it.first.containsMatchIn(text) }
+            .map { it.second }
+            .distinct()
+        val platformProducts = setOf(
+            DebtProduct.HUABEI,
+            DebtProduct.JIEBEI,
+            DebtProduct.JINGDONG_BAITIAO,
+            DebtProduct.WEILIDAI,
+            DebtProduct.MEITUAN_MONTHLY,
+            DebtProduct.DOUYIN_MONTHLY,
+        )
+        // 专有产品文案常同时出现“借款/贷款”，不可再额外生成一个泛贷款候选。
+        val namedProducts = if (matchedProducts.any(platformProducts::contains)) {
+            matchedProducts.filterNot { it == DebtProduct.CONSUMER_LOAN }
+        } else {
+            matchedProducts
+        }
+        val products = if (namedProducts.isNotEmpty()) {
+            namedProducts
+        } else if (qualifiesAsGenericLiability(text, source)) {
+            listOf(DebtProduct.GENERIC_LIABILITY)
+        } else {
+            emptyList()
+        }
+        return products.mapNotNull { product ->
+            parseProduct(product, title, body, sourceNamespace, source)
+        }
+    }
+
+    private fun parseProduct(
+        product: DebtProduct,
+        title: String,
+        body: String,
+        sourceNamespace: String,
+        source: ObservationSource,
     ): DebtDiscoverySignal? {
         val text = "$title\n$body"
-        val product = productRules.firstOrNull { it.first.containsMatchIn(text) }?.second ?: return null
-        if (!eventContext.containsMatchIn(text)) return null
 
         // 信用卡营销文案不能仅因出现“信用卡”建立账户；必须出现实际账户事件或脱敏尾号。
-        val labeledTail = accountTailPatterns.firstNotNullOfOrNull {
-            it.find(text)?.groupValues?.getOrNull(1)
+        // 标题和正文分别取值，禁止跨行把日期、金额或联系电话当成卡尾号。
+        val tail = if (product == DebtProduct.CREDIT_CARD) {
+            extractTail("$title\n$body")
+        } else {
+            null
         }
-        val tail = labeledTail ?: maskedTailPattern.find(text)?.groupValues?.getOrNull(1)
         val stableAccountId = stableAccountIdPattern.find(text)?.groupValues?.getOrNull(1)
         if (tail == null && stableAccountId == null && marketingWords.containsMatchIn(text) &&
             !actualAccountEvent.containsMatchIn(text)
@@ -189,7 +274,9 @@ object DebtSignalParser {
         val strength = when {
             // 文件被选中不等于来源、账户身份、覆盖期和完整性均已验证；M4 验证后才能升级。
             source == ObservationSource.BILL_IMPORT -> DebtEvidenceStrength.IMPORTED_UNVERIFIED
-            eventKind == DebtEventKind.ACCOUNT_HINT -> DebtEvidenceStrength.HINT
+            eventKind == DebtEventKind.ACCOUNT_HINT ||
+                (source == ObservationSource.NOTIFICATION &&
+                    !isKnownNotificationSource(product, sourceNamespace)) -> DebtEvidenceStrength.HINT
             else -> DebtEvidenceStrength.OBSERVATIONAL
         }
         return DebtDiscoverySignal(
@@ -206,6 +293,28 @@ object DebtSignalParser {
         )
     }
 
+    private fun qualifiesAsGenericLiability(text: String, source: ObservationSource): Boolean {
+        if (source != ObservationSource.SMS && source != ObservationSource.BILL_IMPORT) return false
+        val markerCount = genericLiabilityMarkers.count { it.containsMatchIn(text) }
+        return markerCount >= 2 || terminalGenericLiabilityEvent.containsMatchIn(text)
+    }
+
+    private fun isKnownNotificationSource(product: DebtProduct, sourceNamespace: String): Boolean =
+        when (product) {
+            DebtProduct.HUABEI,
+            DebtProduct.JIEBEI,
+            -> sourceNamespace == "com.eg.android.AlipayGphone"
+            DebtProduct.JINGDONG_BAITIAO ->
+                sourceNamespace == "com.jingdong.app.mall" || sourceNamespace == "com.jd.jrapp"
+            DebtProduct.WEILIDAI -> sourceNamespace == "com.tencent.mm"
+            DebtProduct.MEITUAN_MONTHLY -> sourceNamespace == "com.sankuai.meituan"
+            DebtProduct.DOUYIN_MONTHLY -> sourceNamespace == "com.ss.android.ugc.aweme"
+            DebtProduct.CREDIT_CARD,
+            DebtProduct.CONSUMER_LOAN,
+            DebtProduct.GENERIC_LIABILITY,
+            -> false
+        }
+
     private fun institutionFor(
         product: DebtProduct,
         text: String,
@@ -218,9 +327,24 @@ object DebtSignalParser {
         DebtProduct.DOUYIN_MONTHLY -> "DOUYIN" to "抖音"
         DebtProduct.CREDIT_CARD,
         DebtProduct.CONSUMER_LOAN,
+        DebtProduct.GENERIC_LIABILITY,
         -> institutions.firstOrNull { it.pattern.containsMatchIn("$sourceNamespace\n$text") }
             ?.let { it.code to it.label }
             ?: "UNKNOWN" to "未识别机构"
+    }
+
+    private fun extractTail(segment: String): String? {
+        val tails = buildSet {
+            accountTailPatterns.forEach { pattern ->
+                pattern.findAll(segment).forEach { match ->
+                    match.groupValues.getOrNull(1)?.takeIf(String::isNotBlank)?.let(::add)
+                }
+            }
+            maskedTailPattern.findAll(segment).forEach { match ->
+                match.groupValues.getOrNull(1)?.takeIf(String::isNotBlank)?.let(::add)
+            }
+        }
+        return tails.singleOrNull()
     }
 
     private fun extractAmount(text: String, eventKind: DebtEventKind): Pair<DebtAmountRole, Long?> {
@@ -284,8 +408,9 @@ fun buildDebtAccountIdentity(
         DebtProduct.DOUYIN_MONTHLY -> "抖音月付"
         DebtProduct.CREDIT_CARD -> "${signal.institutionLabel}信用卡"
         DebtProduct.CONSUMER_LOAN -> "${signal.institutionLabel}贷款"
+        DebtProduct.GENERIC_LIABILITY -> "${signal.institutionLabel}负债线索"
     }
-    val displayLabel = signal.maskedSuffix?.let { "$productLabel ••$it" } ?: productLabel
+    val displayLabel = signal.maskedSuffix?.let { "$productLabel（明确尾号 ••$it）" } ?: productLabel
     return DebtAccountIdentity(
         clusterHash = clusterHash,
         identityHash = identityHash,

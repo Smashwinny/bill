@@ -242,11 +242,12 @@ abstract class DebtAccountDao {
     abstract fun supersedeScanVersion(observationId: Long, contentHash: String)
 
     @Query(
-        "DELETE FROM debt_account WHERE status IN ('SUSPECTED', 'IDENTIFIED') " +
+        "UPDATE debt_account SET status = 'DORMANT', updated_at_ms = :updatedAtMs " +
+            "WHERE status IN ('SUSPECTED', 'IDENTIFIED') " +
             "AND NOT EXISTS (SELECT 1 FROM debt_account_evidence " +
             "WHERE account_id = debt_account.id AND is_current = 1)"
     )
-    abstract fun deleteOrphanUnbaselinedAccounts(): Int
+    abstract fun retireUnreferencedCandidates(updatedAtMs: Long): Int
 
     @Query(
         "SELECT raw_observation.id AS observation_id, raw_observation.source AS source, " +
@@ -307,10 +308,13 @@ abstract class DebtAccountDao {
     @Query("SELECT COUNT(*) FROM debt_account")
     abstract fun countAll(): Long
 
+    @Query("SELECT COUNT(*) FROM debt_account WHERE status NOT IN ('EXCLUDED', 'DORMANT')")
+    abstract fun countVisible(): Long
+
     @Query("SELECT COUNT(*) FROM debt_account WHERE status = :status")
     abstract fun countByStatus(status: DebtAccountStatus): Long
 
-    @Query("SELECT * FROM debt_account WHERE status != 'EXCLUDED' ORDER BY last_seen_at_ms DESC, id DESC")
+    @Query("SELECT * FROM debt_account WHERE status NOT IN ('EXCLUDED', 'DORMANT') ORDER BY last_seen_at_ms DESC, id DESC")
     abstract fun listVisible(): List<DebtAccountEntity>
 
     @Query("SELECT COUNT(*) FROM debt_account_evidence WHERE account_id = :accountId AND is_current = 1")

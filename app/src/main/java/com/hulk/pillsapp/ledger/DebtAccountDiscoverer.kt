@@ -30,20 +30,20 @@ object DebtAccountDiscoverer {
         hashMaterial: (String) -> String,
     ): Boolean {
         val parsed = runCatching {
-            DebtSignalParser.parse(
+            DebtSignalParser.parseAll(
                 title = input.title,
                 body = input.body,
                 sourceNamespace = input.packageName,
                 source = input.source,
             )
         }
-        val signal = parsed.getOrNull()
+        val signals = parsed.getOrNull().orEmpty()
         val now = System.currentTimeMillis()
         db.runInTransaction {
             val dao = db.debtAccountDao()
             dao.supersedeEvidenceVersion(input.observationId, input.contentHash)
             dao.supersedeScanVersion(input.observationId, input.contentHash)
-            if (parsed.isFailure || signal == null) {
+            if (parsed.isFailure || signals.isEmpty()) {
                 dao.insertScan(
                     AccountDiscoveryScanEntity(
                         observationId = input.observationId,
@@ -58,88 +58,103 @@ object DebtAccountDiscoverer {
                         scannedAtMs = now,
                     )
                 )
-                dao.deleteOrphanUnbaselinedAccounts()
+                dao.retireUnreferencedCandidates(now)
                 return@runInTransaction
             }
 
-            val identity = buildDebtAccountIdentity(
-                signal = signal,
-                userHandle = input.userHandle,
-                sourceNamespace = input.packageName,
-                hashMaterial = hashMaterial,
-            )
-            val proposed = DebtAccountEntity(
-                publicId = UUID.randomUUID().toString(),
-                clusterHash = identity.clusterHash,
-                identityHash = identity.identityHash,
-                product = signal.product,
-                institutionCode = signal.institutionCode,
-                institutionLabel = signal.institutionLabel,
-                displayLabel = identity.displayLabel,
-                maskedSuffix = signal.maskedSuffix,
-                userHandle = input.userHandle,
-                status = identity.status,
-                confidence = identity.confidence,
-                lastEventKind = signal.eventKind,
-                lastEvidenceStrength = signal.evidenceStrength,
-                dueDayOfMonth = signal.dueDayOfMonth,
-                firstSeenAtMs = input.postTimeMs,
-                lastSeenAtMs = input.postTimeMs,
-                createdAtMs = now,
-                updatedAtMs = now,
-            )
+            signals.forEach { signal ->
+                val identity = buildDebtAccountIdentity(
+                    signal = signal,
+                    userHandle = input.userHandle,
+                    sourceNamespace = input.packageName,
+                    hashMaterial = hashMaterial,
+                )
+                val proposed = DebtAccountEntity(
+                    publicId = UUID.randomUUID().toString(),
+                    clusterHash = identity.clusterHash,
+                    identityHash = identity.identityHash,
+                    product = signal.product,
+                    institutionCode = signal.institutionCode,
+                    institutionLabel = signal.institutionLabel,
+                    displayLabel = identity.displayLabel,
+                    maskedSuffix = signal.maskedSuffix,
+                    userHandle = input.userHandle,
+                    status = identity.status,
+                    confidence = identity.confidence,
+                    lastEventKind = signal.eventKind,
+                    lastEvidenceStrength = signal.evidenceStrength,
+                    dueDayOfMonth = signal.dueDayOfMonth,
+                    firstSeenAtMs = input.postTimeMs,
+                    lastSeenAtMs = input.postTimeMs,
+                    createdAtMs = now,
+                    updatedAtMs = now,
+                )
 
-            val clusterExisting = dao.findByClusterHash(identity.clusterHash)
-            val identityExisting = identity.identityHash?.let(dao::findByIdentityHash)
-            val account = when {
-                clusterExisting != null && identityExisting != null &&
-                    clusterExisting.id != identityExisting.id -> {
-                    // 聚类与稳定身份指向不同候选：保留两者并显式冲突，绝不自动吞并。
-                    dao.updateAccount(clusterExisting.copy(status = DebtAccountStatus.CONFLICTED, updatedAtMs = now))
-                    dao.updateAccount(identityExisting.copy(status = DebtAccountStatus.CONFLICTED, updatedAtMs = now))
-                    clusterExisting.copy(status = DebtAccountStatus.CONFLICTED, updatedAtMs = now)
-                }
-                clusterExisting != null -> updateExisting(dao, clusterExisting, proposed, now)
-                identityExisting != null -> updateExisting(dao, identityExisting, proposed, now)
-                else -> {
-                    val insertedId = dao.insertAccountIgnore(proposed)
-                    if (insertedId == -1L) {
-                        dao.findByClusterHash(identity.clusterHash)
-                            ?: identity.identityHash?.let(dao::findByIdentityHash)
-                            ?: error("负债账户唯一约束冲突后无法读取")
-                    } else {
-                        proposed.copy(id = insertedId)
+                val clusterExisting = dao.findByClusterHash(identity.clusterHash)
+                val identityExisting = identity.identityHash?.let(dao::findByIdentityHash)
+                val account = when {
+                    clusterExisting != null && identityExisting != null &&
+                        clusterExisting.id != identityExisting.id -> {
+                        // 聚类与稳定身份指向不同候选：保留两者并显式冲突，绝不自动吞并。
+                        dao.updateAccount(
+                            clusterExisting.copy(
+                                status = DebtAccountStatus.CONFLICTED,
+                                updatedAtMs = now,
+                            )
+                        )
+                        dao.updateAccount(
+                            identityExisting.copy(
+                                status = DebtAccountStatus.CONFLICTED,
+                                updatedAtMs = now,
+                            )
+                        )
+                        clusterExisting.copy(
+                            status = DebtAccountStatus.CONFLICTED,
+                            updatedAtMs = now,
+                        )
+                    }
+                    clusterExisting != null -> updateExisting(dao, clusterExisting, proposed, now)
+                    identityExisting != null -> updateExisting(dao, identityExisting, proposed, now)
+                    else -> {
+                        val insertedId = dao.insertAccountIgnore(proposed)
+                        if (insertedId == -1L) {
+                            dao.findByClusterHash(identity.clusterHash)
+                                ?: identity.identityHash?.let(dao::findByIdentityHash)
+                                ?: error("负债账户唯一约束冲突后无法读取")
+                        } else {
+                            proposed.copy(id = insertedId)
+                        }
                     }
                 }
-            }
 
-            val signalFingerprint = hashMaterial(
-                listOf(
-                    "DEBT_SIGNAL",
-                    identity.clusterHash,
-                    signal.eventKind.name,
-                    signal.amountRole.name,
-                    signal.amountCents?.toString().orEmpty(),
-                    signal.dueDayOfMonth?.toString().orEmpty(),
-                ).joinToString(":"),
-            )
-            dao.insertEvidence(
-                DebtAccountEvidenceEntity(
-                    observationId = input.observationId,
-                    accountId = account.id,
-                    contentHash = input.contentHash,
-                    parserVersion = DEBT_DISCOVERY_PARSER_VERSION,
-                    signalFingerprint = signalFingerprint,
-                    isCurrent = true,
-                    eventKind = signal.eventKind,
-                    strength = signal.evidenceStrength,
-                    amountRole = signal.amountRole,
-                    amountCents = signal.amountCents,
-                    dueDayOfMonth = signal.dueDayOfMonth,
-                    observedAtMs = input.postTimeMs,
-                    createdAtMs = now,
+                val signalFingerprint = hashMaterial(
+                    listOf(
+                        "DEBT_SIGNAL",
+                        identity.clusterHash,
+                        signal.eventKind.name,
+                        signal.amountRole.name,
+                        signal.amountCents?.toString().orEmpty(),
+                        signal.dueDayOfMonth?.toString().orEmpty(),
+                    ).joinToString(":"),
                 )
-            )
+                dao.insertEvidence(
+                    DebtAccountEvidenceEntity(
+                        observationId = input.observationId,
+                        accountId = account.id,
+                        contentHash = input.contentHash,
+                        parserVersion = DEBT_DISCOVERY_PARSER_VERSION,
+                        signalFingerprint = signalFingerprint,
+                        isCurrent = true,
+                        eventKind = signal.eventKind,
+                        strength = signal.evidenceStrength,
+                        amountRole = signal.amountRole,
+                        amountCents = signal.amountCents,
+                        dueDayOfMonth = signal.dueDayOfMonth,
+                        observedAtMs = input.postTimeMs,
+                        createdAtMs = now,
+                    )
+                )
+            }
             dao.insertScan(
                 AccountDiscoveryScanEntity(
                     observationId = input.observationId,
@@ -150,9 +165,9 @@ object DebtAccountDiscoverer {
                     scannedAtMs = now,
                 )
             )
-            dao.deleteOrphanUnbaselinedAccounts()
+            dao.retireUnreferencedCandidates(now)
         }
-        return signal != null
+        return signals.isNotEmpty()
     }
 
     private fun updateExisting(

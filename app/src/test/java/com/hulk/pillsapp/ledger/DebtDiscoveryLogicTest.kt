@@ -73,6 +73,108 @@ class DebtDiscoveryLogicTest {
     }
 
     @Test
+    fun yearAfterCreditCardLabelIsNeverTreatedAsTail() {
+        val signal = DebtSignalParser.parse(
+            title = "信用卡账单",
+            body = "信用卡2026年8月账单，本期应还100.00元",
+            sourceNamespace = "95555",
+            source = ObservationSource.SMS,
+        )
+        assertNull(signal?.maskedSuffix)
+    }
+
+    @Test
+    fun contactPhoneTailIsNeverTreatedAsCardTail() {
+        val signal = DebtSignalParser.parse(
+            title = "信用卡账单",
+            body = "联系电话尾号1234，本期应还100.00元",
+            sourceNamespace = "95555",
+            source = ObservationSource.SMS,
+        )
+        assertNull(signal?.maskedSuffix)
+    }
+
+    @Test
+    fun bankBillWithoutCreditCardWordBecomesGenericLiabilityHint() {
+        val signal = DebtSignalParser.parse(
+            title = "招商银行账单提醒",
+            body = "本期应还100.00元，最低还款10.00元",
+            sourceNamespace = "95555",
+            source = ObservationSource.SMS,
+        )
+        assertEquals(DebtProduct.GENERIC_LIABILITY, signal?.product)
+        assertEquals(DebtEventKind.BILL_NOTICE, signal?.eventKind)
+        assertNull(signal?.maskedSuffix)
+    }
+
+    @Test
+    fun debitPurchaseWithoutLiabilityLanguageIsNotDebt() {
+        val signal = DebtSignalParser.parse(
+            title = "招商银行交易提醒",
+            body = "您的账户消费10.00元，余额1000.00元",
+            sourceNamespace = "95555",
+            source = ObservationSource.SMS,
+        )
+        assertNull(signal)
+    }
+
+    @Test
+    fun additionalConsumerLoanBrandCanBeDiscovered() {
+        val signal = DebtSignalParser.parse(
+            title = "度小满账单",
+            body = "本期应还100.00元",
+            sourceNamespace = "com.example.finance",
+            source = ObservationSource.NOTIFICATION,
+        )
+        assertEquals(DebtProduct.CONSUMER_LOAN, signal?.product)
+        assertEquals("DUXIAOMAN", signal?.institutionCode)
+    }
+
+    @Test
+    fun debitRepaymentSourceDoesNotOverrideCreditCardTail() {
+        val signal = DebtSignalParser.parse(
+            title = "信用卡还款成功",
+            body = "已从借记卡•••1234还款至信用卡•••5678",
+            sourceNamespace = "95555",
+            source = ObservationSource.SMS,
+        )
+        assertEquals("5678", signal?.maskedSuffix)
+    }
+
+    @Test
+    fun twoExplicitCreditCardTailsAreAmbiguous() {
+        val signal = DebtSignalParser.parse(
+            title = "信用卡账单",
+            body = "信用卡尾号1234和信用卡尾号5678共有本期应还100.00元",
+            sourceNamespace = "95555",
+            source = ObservationSource.SMS,
+        )
+        assertNull(signal?.maskedSuffix)
+    }
+
+    @Test
+    fun unknownNotificationCannotCreateGenericLiabilityFromGenericWords() {
+        val signal = DebtSignalParser.parse(
+            title = "账单提醒",
+            body = "本期应还100.00元，最低还款10.00元",
+            sourceNamespace = "com.example.chat",
+            source = ObservationSource.NOTIFICATION,
+        )
+        assertNull(signal)
+    }
+
+    @Test
+    fun oneObservationCanExposeMultipleNamedDebtProducts() {
+        val signals = DebtSignalParser.parseAll(
+            title = "还款提醒",
+            body = "花呗本期应还100.00元，借呗本期应还200.00元",
+            sourceNamespace = "com.eg.android.AlipayGphone",
+            source = ObservationSource.NOTIFICATION,
+        )
+        assertEquals(setOf(DebtProduct.HUABEI, DebtProduct.JIEBEI), signals.map { it.product }.toSet())
+    }
+
+    @Test
     fun tailOnlyClustersButNeverConfirmsIdentity() {
         val first = DebtSignalParser.parse(
             "信用卡消费",
