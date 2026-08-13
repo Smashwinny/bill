@@ -68,6 +68,7 @@ object LedgerKernel {
             .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
             .build()
         executor.submit { executorThread = Thread.currentThread() }.get(2, TimeUnit.SECONDS)
+        runSync { requireDb().coverageGapDao().normalizeLegacyOpenState() }
     }
 
     private val sqlitePlaintextHeader = "SQLite format 3\u0000".toByteArray(Charsets.UTF_8)
@@ -183,8 +184,15 @@ object LedgerKernel {
         executor.submit {
             try {
                 block()
-            } catch (_: Throwable) {
-                // 异步任务失败不得影响后续写入；解析失败由 PENDING_PARSE 重试机制兜底。
+            } catch (failure: Throwable) {
+                // 不记录异常消息（可能含敏感内容），但留下类型与时间，避免完整性故障静默。
+                appContext?.let { context ->
+                    runCatching {
+                        java.io.File(context.filesDir, "kernel_async_failure.txt").writeText(
+                            "type=${failure.javaClass.name}\nat_ms=${System.currentTimeMillis()}\n"
+                        )
+                    }
+                }
             }
         }
     }

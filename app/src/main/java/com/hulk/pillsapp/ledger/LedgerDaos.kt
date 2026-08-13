@@ -214,6 +214,10 @@ abstract class CoverageGapDao {
 
     @Query("SELECT * FROM coverage_gap WHERE state = 'ACTIVE' ORDER BY started_at_ms DESC LIMIT 50")
     abstract fun openGaps(): List<CoverageGapEntity>
+
+    /** 兼容早期试验库：旧 OPEN 值按是否已有结束时间归一化，保留全部历史行。 */
+    @Query("UPDATE coverage_gap SET state = CASE WHEN ended_at_ms IS NULL THEN 'ACTIVE' ELSE 'CLOSED' END WHERE state = 'OPEN'")
+    abstract fun normalizeLegacyOpenState(): Int
 }
 
 @Dao

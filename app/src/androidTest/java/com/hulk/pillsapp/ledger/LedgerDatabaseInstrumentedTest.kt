@@ -81,4 +81,16 @@ class LedgerDatabaseInstrumentedTest {
         assertEquals(0L, dao.countOpen())
         assertEquals(0, dao.openGaps().size)
     }
+
+    @Test
+    fun legacyOpenGapStateIsNormalizedWithoutDeletingRows() {
+        db.openHelper.writableDatabase.execSQL(
+            "INSERT INTO coverage_gap(detector, started_at_ms, ended_at_ms, state, note) VALUES('legacy-active', 1000, NULL, 'OPEN', NULL)"
+        )
+        db.openHelper.writableDatabase.execSQL(
+            "INSERT INTO coverage_gap(detector, started_at_ms, ended_at_ms, state, note) VALUES('legacy-closed', 1000, 2000, 'OPEN', NULL)"
+        )
+        assertEquals(2, db.coverageGapDao().normalizeLegacyOpenState())
+        assertEquals(1L, db.coverageGapDao().countOpen())
+    }
 }
