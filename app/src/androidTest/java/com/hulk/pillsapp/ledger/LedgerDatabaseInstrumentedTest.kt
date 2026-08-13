@@ -1,16 +1,25 @@
 package com.hulk.pillsapp.ledger
 
 import androidx.room.Room
+import androidx.room.testing.MigrationTestHelper
+import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class LedgerDatabaseInstrumentedTest {
+    @get:Rule
+    val migrationHelper = MigrationTestHelper(
+        androidx.test.platform.app.InstrumentationRegistry.getInstrumentation(),
+        LedgerDatabase::class.java.canonicalName,
+        FrameworkSQLiteOpenHelperFactory(),
+    )
     private lateinit var db: LedgerDatabase
 
     @Before
@@ -92,5 +101,39 @@ class LedgerDatabaseInstrumentedTest {
         )
         assertEquals(2, db.coverageGapDao().normalizeLegacyOpenState())
         assertEquals(1L, db.coverageGapDao().countOpen())
+    }
+
+    @Test
+    fun migrationOneToTwoPreservesRowsAndCreatesUniqueEvidenceIndex() {
+        val name = "migration-1-2.db"
+        migrationHelper.createDatabase(name, 1).apply {
+            execSQL(
+                "INSERT INTO raw_observation(id, source, source_key, user_handle, package_name, post_time_ms, received_at_ms, title, body, content_hash, capture_path, parse_state, duplicate_count, created_at_ms) " +
+                    "VALUES(1, 'NOTIFICATION', '0:key', 0, 'com.example.pay', 1000, 1001, '支付', '10元', 'h', 'LIVE_CALLBACK', 'PARSED', 0, 1001)"
+            )
+            execSQL(
+                "INSERT INTO canonical_transaction(id, strong_id_hash, type, status, amount_cents, currency, merchant_hint, occurred_at_ms, backfilled_from, created_at_ms) " +
+                    "VALUES(1, NULL, 'PAYMENT', 'DETECTED', 1000, 'CNY', NULL, 1000, NULL, 1001)"
+            )
+            execSQL(
+                "INSERT INTO evidence_link(id, observation_id, canonical_tx_id, match_reason, created_at_ms) " +
+                    "VALUES(1, 1, 1, 'WEAK_OBSERVATION_ONLY', 1001)"
+            )
+            execSQL(
+                "INSERT INTO coverage_gap(id, detector, started_at_ms, ended_at_ms, state, note) " +
+                    "VALUES(1, 'legacy', 1000, 2000, 'OPEN', NULL)"
+            )
+            close()
+        }
+        migrationHelper.runMigrationsAndValidate(name, 2, true, MIGRATION_1_2).use { migrated ->
+            migrated.query("SELECT COUNT(*) FROM raw_observation").use {
+                it.moveToFirst()
+                assertEquals(1, it.getInt(0))
+            }
+            migrated.query("SELECT state FROM coverage_gap WHERE id = 1").use {
+                it.moveToFirst()
+                assertEquals("CLOSED", it.getString(0))
+            }
+        }
     }
 }

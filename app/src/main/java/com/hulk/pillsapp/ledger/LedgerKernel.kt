@@ -65,6 +65,7 @@ object LedgerKernel {
         // 因此每个 factory 必须持有独立拷贝。
         database = Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, DB_NAME)
             .openHelperFactory(net.sqlcipher.database.SupportFactory(passphrase.copyOf()))
+            .addMigrations(MIGRATION_1_2)
             .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
             .build()
         executor.submit { executorThread = Thread.currentThread() }.get(2, TimeUnit.SECONDS)
@@ -113,6 +114,7 @@ object LedgerKernel {
         )
         val encryptedDb = Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, encName)
             .openHelperFactory(net.sqlcipher.database.SupportFactory(passphrase.copyOf()))
+            .addMigrations(MIGRATION_1_2)
             .build()
         try {
             val writable = encryptedDb.openHelper.writableDatabase
