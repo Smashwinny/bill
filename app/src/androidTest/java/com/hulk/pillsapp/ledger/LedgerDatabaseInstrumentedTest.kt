@@ -5,6 +5,7 @@ import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hulk.pillsapp.sha256Hex
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
@@ -135,5 +136,113 @@ class LedgerDatabaseInstrumentedTest {
                 assertEquals("CLOSED", it.getString(0))
             }
         }
+    }
+
+    @Test
+    fun migrationTwoToThreePreservesKernelRowsAndCreatesEmptyDiscoveryTables() {
+        val name = "migration-2-3.db"
+        migrationHelper.createDatabase(name, 2).apply {
+            execSQL(
+                "INSERT INTO raw_observation(id, source, source_key, user_handle, package_name, post_time_ms, received_at_ms, title, body, content_hash, capture_path, parse_state, duplicate_count, created_at_ms) " +
+                    "VALUES(1, 'NOTIFICATION', '0:key', 0, 'com.example.pay', 1000, 1001, '支付', '10元', 'h', 'LIVE_CALLBACK', 'PARSED', 0, 1001)"
+            )
+            execSQL(
+                "INSERT INTO observation_revision(id, observation_id, revision_hash, title, body, revised_at_ms) " +
+                    "VALUES(1, 1, 'h', '支付', '10元', 1001)"
+            )
+            execSQL(
+                "INSERT INTO canonical_transaction(id, strong_id_hash, type, status, amount_cents, currency, merchant_hint, occurred_at_ms, backfilled_from, created_at_ms) " +
+                    "VALUES(1, NULL, 'PAYMENT', 'DETECTED', 1000, 'CNY', NULL, 1000, NULL, 1001)"
+            )
+            close()
+        }
+        migrationHelper.runMigrationsAndValidate(name, 3, true, MIGRATION_2_3).use { migrated ->
+            migrated.query("SELECT COUNT(*) FROM raw_observation").use {
+                it.moveToFirst()
+                assertEquals(1, it.getInt(0))
+            }
+            migrated.query("SELECT COUNT(*) FROM observation_revision").use {
+                it.moveToFirst()
+                assertEquals(1, it.getInt(0))
+            }
+            migrated.query("SELECT COUNT(*) FROM canonical_transaction").use {
+                it.moveToFirst()
+                assertEquals(1, it.getInt(0))
+            }
+            migrated.query("SELECT COUNT(*) FROM debt_account").use {
+                it.moveToFirst()
+                assertEquals(0, it.getInt(0))
+            }
+            migrated.query("SELECT COUNT(*) FROM account_discovery_scan").use {
+                it.moveToFirst()
+                assertEquals(0, it.getInt(0))
+            }
+        }
+    }
+
+    @Test
+    fun debtDiscoveryKeepsRevisionAuditAndSecondDrainIsIdempotent() {
+        val first = db.observationDao().ingest(
+            observation("花呗本期应还 100.00 元，还款日为每月10日", "debt-bill")
+        )
+        assertEquals(1, DebtAccountDiscoverer.drain(db, ::sha256Hex))
+
+        db.observationDao().ingest(
+            observation("花呗还款成功，已成功还款 100.00 元", "debt-repayment")
+        )
+        assertEquals(1, DebtAccountDiscoverer.drain(db, ::sha256Hex))
+        assertEquals(0, DebtAccountDiscoverer.drain(db, ::sha256Hex))
+
+        assertEquals(1L, db.debtAccountDao().countAll())
+        assertEquals(2L, db.debtAccountDao().countEvidenceHistoryForObservation(first.id))
+        assertEquals(2L, db.debtAccountDao().countCurrentScans())
+        assertEquals(
+            DebtEventKind.BILL_NOTICE,
+            db.debtAccountDao().findCurrentEvidenceForRevision(first.id, "debt-bill")?.eventKind,
+        )
+        assertEquals(
+            DebtEventKind.REPAYMENT,
+            db.debtAccountDao().findCurrentEvidenceForRevision(first.id, "debt-repayment")?.eventKind,
+        )
+    }
+
+    @Test
+    fun sameAmountDifferentCardTailsRemainDifferentDebtCandidates() {
+        db.observationDao().ingest(
+            observation("招商银行信用卡尾号1234消费10.00元", "tail-1234")
+                .copy(source = ObservationSource.SMS, sourceKey = "sms:1", packageName = "95555")
+        )
+        db.observationDao().ingest(
+            observation("招商银行信用卡尾号5678消费10.00元", "tail-5678")
+                .copy(source = ObservationSource.SMS, sourceKey = "sms:2", packageName = "95555")
+        )
+        assertEquals(2, DebtAccountDiscoverer.drain(db, ::sha256Hex))
+        assertEquals(2L, db.debtAccountDao().countAll())
+        assertEquals(2L, db.debtAccountDao().countByStatus(DebtAccountStatus.SUSPECTED))
+    }
+
+    @Test
+    fun unverifiedBillImportNeverCreatesDebtBaseline() {
+        db.observationDao().ingest(
+            observation("账单账户 ABCDEF123456，花呗全部待还 8000.00 元", "bill-import")
+                .copy(
+                    source = ObservationSource.BILL_IMPORT,
+                    sourceKey = "bill:1",
+                    packageName = "selected-document",
+                )
+        )
+        DebtAccountDiscoverer.drain(db, ::sha256Hex)
+        assertEquals(0L, db.debtAccountDao().countByStatus(DebtAccountStatus.BASELINED))
+        assertEquals(1L, db.debtAccountDao().countByStatus(DebtAccountStatus.SUSPECTED))
+    }
+
+    @Test
+    fun creditLimitMarketingCreatesNoDebtAccount() {
+        db.observationDao().ingest(
+            observation("花呗额度提升，最高可用额度20000元，立即领取", "marketing")
+        )
+        DebtAccountDiscoverer.drain(db, ::sha256Hex)
+        assertEquals(0L, db.debtAccountDao().countAll())
+        assertEquals(0L, db.debtAccountDao().countPendingDiscovery(DEBT_DISCOVERY_PARSER_VERSION))
     }
 }

@@ -138,6 +138,112 @@ data class EvidenceLinkEntity(
     @ColumnInfo(name = "created_at_ms") val createdAtMs: Long,
 )
 
+/**
+ * M3 自动发现的负债账户候选，不是交易。M3 不保存“当前余额”；M4 完成账单来源、账户身份、
+ * 覆盖期和完整性校验后，另建不可变余额快照，才能升级 BASELINED。
+ */
+@Entity(
+    tableName = "debt_account",
+    indices = [
+        Index(value = ["public_id"], unique = true),
+        Index(value = ["cluster_hash"], unique = true),
+        Index(value = ["identity_hash"], unique = true),
+        Index(value = ["status"]),
+    ],
+)
+data class DebtAccountEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    /** 随机稳定 ID，供未来跨设备同步引用；不含任何账户信息。 */
+    @ColumnInfo(name = "public_id") val publicId: String,
+    /** 仅用于折叠疑似线索，不能驱动正式账目归并。 */
+    @ColumnInfo(name = "cluster_hash") val clusterHash: String,
+    /** 只有稳定账户/合同标识通过来源验证后才存在；尾号永远不进入此字段。 */
+    @ColumnInfo(name = "identity_hash") val identityHash: String?,
+    val product: DebtProduct,
+    @ColumnInfo(name = "institution_code") val institutionCode: String,
+    @ColumnInfo(name = "institution_label") val institutionLabel: String,
+    @ColumnInfo(name = "display_label") val displayLabel: String,
+    @ColumnInfo(name = "masked_suffix") val maskedSuffix: String?,
+    @ColumnInfo(name = "user_handle") val userHandle: Int,
+    val currency: String = "CNY",
+    val status: DebtAccountStatus,
+    val confidence: Int,
+    @ColumnInfo(name = "last_event_kind") val lastEventKind: DebtEventKind,
+    @ColumnInfo(name = "last_evidence_strength") val lastEvidenceStrength: DebtEvidenceStrength,
+    @ColumnInfo(name = "due_day_of_month") val dueDayOfMonth: Int?,
+    @ColumnInfo(name = "first_seen_at_ms") val firstSeenAtMs: Long,
+    @ColumnInfo(name = "last_seen_at_ms") val lastSeenAtMs: Long,
+    @ColumnInfo(name = "created_at_ms") val createdAtMs: Long,
+    @ColumnInfo(name = "updated_at_ms") val updatedAtMs: Long,
+)
+
+/** 一条观察修订对一个负债候选的脱敏结构化证据；新修订只标旧证据失效，不删除审计链。 */
+@Entity(
+    tableName = "debt_account_evidence",
+    foreignKeys = [
+        ForeignKey(
+            entity = RawObservationEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["observation_id"],
+            onDelete = ForeignKey.NO_ACTION,
+        ),
+        ForeignKey(
+            entity = DebtAccountEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["account_id"],
+            onDelete = ForeignKey.NO_ACTION,
+        ),
+    ],
+    indices = [
+        Index(
+            value = ["observation_id", "content_hash", "parser_version", "signal_fingerprint"],
+            unique = true,
+        ),
+        Index(value = ["account_id"]),
+        Index(value = ["event_kind"]),
+        Index(value = ["observation_id", "is_current"]),
+    ],
+)
+data class DebtAccountEvidenceEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "observation_id") val observationId: Long,
+    @ColumnInfo(name = "account_id") val accountId: Long,
+    @ColumnInfo(name = "content_hash") val contentHash: String,
+    @ColumnInfo(name = "parser_version") val parserVersion: Int,
+    @ColumnInfo(name = "signal_fingerprint") val signalFingerprint: String,
+    @ColumnInfo(name = "is_current") val isCurrent: Boolean,
+    @ColumnInfo(name = "event_kind") val eventKind: DebtEventKind,
+    val strength: DebtEvidenceStrength,
+    @ColumnInfo(name = "amount_role") val amountRole: DebtAmountRole,
+    @ColumnInfo(name = "amount_cents") val amountCents: Long?,
+    @ColumnInfo(name = "due_day_of_month") val dueDayOfMonth: Int?,
+    @ColumnInfo(name = "observed_at_ms") val observedAtMs: Long,
+    @ColumnInfo(name = "created_at_ms") val createdAtMs: Long,
+)
+
+/** 负面结果也保留审计历史；每个观察只有一条 current 游标用于避免启动时全表重扫。 */
+@Entity(
+    tableName = "account_discovery_scan",
+    primaryKeys = ["observation_id", "content_hash", "parser_version"],
+    foreignKeys = [
+        ForeignKey(
+            entity = RawObservationEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["observation_id"],
+            onDelete = ForeignKey.NO_ACTION,
+        ),
+    ],
+    indices = [Index(value = ["parser_version"]), Index(value = ["observation_id", "is_current"])],
+)
+data class AccountDiscoveryScanEntity(
+    @ColumnInfo(name = "observation_id") val observationId: Long,
+    @ColumnInfo(name = "content_hash") val contentHash: String,
+    @ColumnInfo(name = "parser_version") val parserVersion: Int,
+    @ColumnInfo(name = "is_current") val isCurrent: Boolean,
+    val result: DiscoveryScanResult,
+    @ColumnInfo(name = "scanned_at_ms") val scannedAtMs: Long,
+)
+
 @Entity(tableName = "reconciliation_run")
 data class ReconciliationRunEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

@@ -65,4 +65,12 @@
     <string name="m2_request_sms">请求短信权限（银行短信观察）</string>
     <string name="m2_request_battery">设为电池无限制</string>
     <string name="m2_autostart">打开自启动设置（HyperOS）</string>
+    <string name="m3_debt_section_title">自动负债账户发现（M3）</string>
+    <string name="m3_debt_counts_format">候选 %1$d 个 · 疑似 %2$d · 已识别 %3$d · 已建立余额基线 %4$d</string>
+    <string name="m3_discovery_progress_format">历史修订扫描 %1$d/%2$d · 待扫描 %3$d · 失败 %4$d</string>
+    <string name="m3_repayment_pending_format">缺少权威余额基线的还款线索：%1$d 条</string>
+    <string name="m3_candidate_notice">候选只表示检测到线索，不等于已核验欠款；额度、应还提醒和还款金额不会自动写成负债余额。</string>
+    <string name="m3_rescan">重新扫描负债线索</string>
+    <string name="m3_no_candidates">暂未发现负债账户线索</string>
+    <string name="m3_more_candidates">另有 %1$d 个候选未展开</string>
 </resources>

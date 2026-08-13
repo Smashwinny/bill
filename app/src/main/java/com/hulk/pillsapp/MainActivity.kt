@@ -50,6 +50,9 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import com.hulk.pillsapp.ledger.LedgerKernel
 import com.hulk.pillsapp.ledger.SmsBackfill
+import com.hulk.pillsapp.ledger.DebtAccountStatus
+import com.hulk.pillsapp.ledger.DebtEventKind
+import com.hulk.pillsapp.ledger.DebtEvidenceStrength
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -66,6 +69,33 @@ private val probeActionLabels = mapOf(
     ProbeAction.SUCCESS_PAYMENT to "成功支付",
     ProbeAction.FULL_REFUND to "全额退款",
     ProbeAction.PARTIAL_REFUND to "部分退款",
+)
+
+private val debtStatusLabels = mapOf(
+    DebtAccountStatus.SUSPECTED to "疑似线索",
+    DebtAccountStatus.IDENTIFIED to "已识别账户",
+    DebtAccountStatus.BASELINED to "已有权威余额基线",
+    DebtAccountStatus.RECONCILABLE to "可连续对账",
+    DebtAccountStatus.CONFLICTED to "身份冲突",
+    DebtAccountStatus.DORMANT to "休眠",
+    DebtAccountStatus.EXCLUDED to "已排除",
+)
+
+private val debtEventLabels = mapOf(
+    DebtEventKind.ACCOUNT_HINT to "账户线索",
+    DebtEventKind.PURCHASE_ON_CREDIT to "信用消费线索",
+    DebtEventKind.BILL_NOTICE to "账单线索",
+    DebtEventKind.REPAYMENT to "还款成功线索",
+    DebtEventKind.REFUND_TO_LIABILITY to "退款冲抵线索",
+    DebtEventKind.INTEREST_OR_FEE to "息费线索",
+    DebtEventKind.OVERDUE to "逾期线索",
+)
+
+private val debtStrengthLabels = mapOf(
+    DebtEvidenceStrength.HINT to "弱提示",
+    DebtEvidenceStrength.OBSERVATIONAL to "观察证据",
+    DebtEvidenceStrength.IMPORTED_UNVERIFIED to "导入待校验",
+    DebtEvidenceStrength.AUTHORITATIVE to "权威已校验",
 )
 
 class MainActivity : ComponentActivity() {
@@ -208,6 +238,7 @@ private fun AppHome(
             onOpenAutostartSettings = onOpenAutostartSettings,
             onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
         )
+        DebtDiscoverySection()
 
         Spacer(modifier = Modifier.height(20.dp))
         ProbeConfigurationSection(
@@ -346,6 +377,68 @@ private fun AppHome(
                     }
                 },
             )
+        }
+    }
+}
+
+@Composable
+private fun DebtDiscoverySection() {
+    val status by LedgerKernel.status.collectAsState()
+    Spacer(modifier = Modifier.height(16.dp))
+    Text(text = stringResource(R.string.m3_debt_section_title))
+    Text(
+        text = stringResource(
+            R.string.m3_debt_counts_format,
+            status.debtAccountCount,
+            status.suspectedDebtCount,
+            status.identifiedDebtCount,
+            status.baselinedDebtCount,
+        )
+    )
+    Text(
+        text = stringResource(
+            R.string.m3_discovery_progress_format,
+            status.discoveryScannedCount,
+            status.eligibleRevisionCount,
+            status.debtDiscoveryPendingCount,
+            status.discoveryFailedCount,
+        )
+    )
+    Text(
+        text = stringResource(
+            R.string.m3_repayment_pending_format,
+            status.repaymentsAwaitingBaselineCount,
+        )
+    )
+    Text(text = stringResource(R.string.m3_candidate_notice))
+    Button(
+        onClick = { LedgerKernel.runDebtDiscovery() },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(text = stringResource(R.string.m3_rescan))
+    }
+    if (status.debtAccounts.isEmpty()) {
+        Text(text = stringResource(R.string.m3_no_candidates))
+    } else {
+        status.debtAccounts.take(20).forEach { account ->
+            Card(
+                colors = CardDefaults.cardColors(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(text = account.displayLabel)
+                    Text(text = "状态：${debtStatusLabels[account.status] ?: account.status.name}")
+                    Text(text = "最近线索：${debtEventLabels[account.lastEventKind] ?: account.lastEventKind.name}")
+                    Text(text = "证据级别：${debtStrengthLabels[account.lastEvidenceStrength] ?: account.lastEvidenceStrength.name}")
+                    account.dueDayOfMonth?.let { Text(text = "检测到还款日：每月 $it 日（待账单确认）") }
+                    Text(text = "最近发现：${formatEventTime(account.lastSeenAtMs)}")
+                }
+            }
+        }
+        if (status.debtAccounts.size > 20) {
+            Text(text = stringResource(R.string.m3_more_candidates, status.debtAccounts.size - 20))
         }
     }
 }

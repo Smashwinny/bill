@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import androidx.room.Update
 
 /** 同步落盘的判定结果；id 均为 raw_observation.id。 */
 sealed interface IngestOutcome {
@@ -14,6 +15,19 @@ sealed interface IngestOutcome {
     data class Duplicate(override val id: Long) : IngestOutcome
     data class Revised(override val id: Long) : IngestOutcome
 }
+
+/** observation_revision 与其来源元数据的只读投影，保证每个通知修订都独立接受发现审计。 */
+data class DebtDiscoveryInput(
+    @androidx.room.ColumnInfo(name = "observation_id") val observationId: Long,
+    val source: ObservationSource,
+    @androidx.room.ColumnInfo(name = "user_handle") val userHandle: Int,
+    @androidx.room.ColumnInfo(name = "package_name") val packageName: String,
+    @androidx.room.ColumnInfo(name = "post_time_ms") val postTimeMs: Long,
+    @androidx.room.ColumnInfo(name = "content_hash") val contentHash: String,
+    val title: String,
+    val body: String,
+    @androidx.room.ColumnInfo(name = "revision_at_ms") val revisionAtMs: Long,
+)
 
 @Dao
 abstract class ObservationDao {
@@ -196,6 +210,151 @@ abstract class CanonicalDao {
 
     @Query("SELECT COUNT(*) FROM evidence_link WHERE observation_id = :observationId")
     abstract fun countEvidenceForObservation(observationId: Long): Long
+}
+
+@Dao
+abstract class DebtAccountDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    abstract fun insertAccountIgnore(account: DebtAccountEntity): Long
+
+    @Update
+    abstract fun updateAccount(account: DebtAccountEntity)
+
+    @Query("SELECT * FROM debt_account WHERE cluster_hash = :clusterHash LIMIT 1")
+    abstract fun findByClusterHash(clusterHash: String): DebtAccountEntity?
+
+    @Query("SELECT * FROM debt_account WHERE identity_hash = :identityHash LIMIT 1")
+    abstract fun findByIdentityHash(identityHash: String): DebtAccountEntity?
+
+    @Query("SELECT * FROM debt_account WHERE id = :id")
+    abstract fun findById(id: Long): DebtAccountEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract fun insertEvidence(evidence: DebtAccountEvidenceEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract fun insertScan(scan: AccountDiscoveryScanEntity)
+
+    @Query("UPDATE debt_account_evidence SET is_current = 0 WHERE observation_id = :observationId AND content_hash = :contentHash AND is_current = 1")
+    abstract fun supersedeEvidenceVersion(observationId: Long, contentHash: String)
+
+    @Query("UPDATE account_discovery_scan SET is_current = 0 WHERE observation_id = :observationId AND content_hash = :contentHash AND is_current = 1")
+    abstract fun supersedeScanVersion(observationId: Long, contentHash: String)
+
+    @Query(
+        "DELETE FROM debt_account WHERE status IN ('SUSPECTED', 'IDENTIFIED') " +
+            "AND NOT EXISTS (SELECT 1 FROM debt_account_evidence " +
+            "WHERE account_id = debt_account.id AND is_current = 1)"
+    )
+    abstract fun deleteOrphanUnbaselinedAccounts(): Int
+
+    @Query(
+        "SELECT raw_observation.id AS observation_id, raw_observation.source AS source, " +
+            "raw_observation.user_handle AS user_handle, raw_observation.package_name AS package_name, " +
+            "raw_observation.post_time_ms AS post_time_ms, observation_revision.revision_hash AS content_hash, " +
+            "observation_revision.title AS title, observation_revision.body AS body, " +
+            "observation_revision.revised_at_ms AS revision_at_ms " +
+            "FROM observation_revision INNER JOIN raw_observation " +
+            "ON raw_observation.id = observation_revision.observation_id " +
+            "LEFT JOIN account_discovery_scan ON account_discovery_scan.observation_id = raw_observation.id " +
+            "AND account_discovery_scan.content_hash = observation_revision.revision_hash " +
+            "AND account_discovery_scan.is_current = 1 " +
+            "WHERE account_discovery_scan.observation_id IS NULL " +
+            "OR account_discovery_scan.parser_version < :parserVersion " +
+            "ORDER BY raw_observation.id, observation_revision.id LIMIT :limit"
+    )
+    abstract fun pendingDiscovery(parserVersion: Int, limit: Int): List<DebtDiscoveryInput>
+
+    @Query(
+        "SELECT raw_observation.id AS observation_id, raw_observation.source AS source, " +
+            "raw_observation.user_handle AS user_handle, raw_observation.package_name AS package_name, " +
+            "raw_observation.post_time_ms AS post_time_ms, observation_revision.revision_hash AS content_hash, " +
+            "observation_revision.title AS title, observation_revision.body AS body, " +
+            "observation_revision.revised_at_ms AS revision_at_ms " +
+            "FROM observation_revision INNER JOIN raw_observation " +
+            "ON raw_observation.id = observation_revision.observation_id " +
+            "LEFT JOIN account_discovery_scan ON account_discovery_scan.observation_id = raw_observation.id " +
+            "AND account_discovery_scan.content_hash = observation_revision.revision_hash " +
+            "AND account_discovery_scan.is_current = 1 " +
+            "WHERE raw_observation.id = :observationId AND (account_discovery_scan.observation_id IS NULL " +
+            "OR account_discovery_scan.parser_version < :parserVersion) " +
+            "ORDER BY observation_revision.id"
+    )
+    abstract fun pendingDiscoveryForObservation(
+        observationId: Long,
+        parserVersion: Int,
+    ): List<DebtDiscoveryInput>
+
+    @Query(
+        "SELECT COUNT(*) FROM observation_revision " +
+            "LEFT JOIN account_discovery_scan ON account_discovery_scan.observation_id = observation_revision.observation_id " +
+            "AND account_discovery_scan.content_hash = observation_revision.revision_hash " +
+            "AND account_discovery_scan.is_current = 1 " +
+            "WHERE account_discovery_scan.observation_id IS NULL " +
+            "OR account_discovery_scan.parser_version < :parserVersion"
+    )
+    abstract fun countPendingDiscovery(parserVersion: Int): Long
+
+    @Query("SELECT COUNT(*) FROM observation_revision")
+    abstract fun countEligibleRevisions(): Long
+
+    @Query("SELECT COUNT(*) FROM account_discovery_scan WHERE is_current = 1")
+    abstract fun countCurrentScans(): Long
+
+    @Query("SELECT COUNT(*) FROM account_discovery_scan WHERE is_current = 1 AND result = 'FAILED'")
+    abstract fun countFailedScans(): Long
+
+    @Query("SELECT COUNT(*) FROM debt_account")
+    abstract fun countAll(): Long
+
+    @Query("SELECT COUNT(*) FROM debt_account WHERE status = :status")
+    abstract fun countByStatus(status: DebtAccountStatus): Long
+
+    @Query("SELECT * FROM debt_account WHERE status != 'EXCLUDED' ORDER BY last_seen_at_ms DESC, id DESC")
+    abstract fun listVisible(): List<DebtAccountEntity>
+
+    @Query("SELECT COUNT(*) FROM debt_account_evidence WHERE account_id = :accountId AND is_current = 1")
+    abstract fun countCurrentEvidenceForAccount(accountId: Long): Long
+
+    @Query("SELECT COUNT(*) FROM debt_account_evidence WHERE observation_id = :observationId")
+    abstract fun countEvidenceHistoryForObservation(observationId: Long): Long
+
+    @Query("SELECT COUNT(*) FROM debt_account_evidence WHERE is_current = 1")
+    abstract fun countCurrentEvidence(): Long
+
+    @Query("SELECT COUNT(*) FROM debt_account_evidence LEFT JOIN debt_account ON debt_account.id = debt_account_evidence.account_id WHERE debt_account.id IS NULL")
+    abstract fun countOrphanEvidence(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM debt_account_evidence " +
+            "GROUP BY observation_id, content_hash, parser_version, signal_fingerprint HAVING COUNT(*) > 1)"
+    )
+    abstract fun countDuplicateSignalFingerprints(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM debt_account WHERE identity_hash IS NOT NULL " +
+            "GROUP BY identity_hash HAVING COUNT(*) > 1)"
+    )
+    abstract fun countDuplicateConfirmedIdentities(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM debt_account WHERE status = :status AND NOT EXISTS (" +
+            "SELECT 1 FROM debt_account_evidence WHERE account_id = debt_account.id " +
+            "AND is_current = 1 AND strength = 'AUTHORITATIVE')"
+    )
+    abstract fun countStatusWithoutAuthoritativeEvidence(status: DebtAccountStatus): Long
+
+    @Query("SELECT * FROM debt_account_evidence WHERE observation_id = :observationId AND content_hash = :contentHash AND is_current = 1 LIMIT 1")
+    abstract fun findCurrentEvidenceForRevision(observationId: Long, contentHash: String): DebtAccountEvidenceEntity?
+
+    @Query(
+        "SELECT COUNT(*) FROM debt_account_evidence " +
+            "INNER JOIN debt_account ON debt_account.id = debt_account_evidence.account_id " +
+            "WHERE debt_account_evidence.event_kind = 'REPAYMENT' " +
+            "AND debt_account_evidence.is_current = 1 " +
+            "AND debt_account.status NOT IN ('BASELINED', 'RECONCILABLE')"
+    )
+    abstract fun countRepaymentsAwaitingBaseline(): Long
 }
 
 @Dao

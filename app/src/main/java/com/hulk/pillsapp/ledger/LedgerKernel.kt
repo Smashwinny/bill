@@ -18,6 +18,25 @@ data class KernelStatus(
     val pendingParseCount: Long = 0,
     val openGapCount: Long = 0,
     val openGaps: List<CoverageGapEntity> = emptyList(),
+    val debtAccountCount: Long = 0,
+    val suspectedDebtCount: Long = 0,
+    val identifiedDebtCount: Long = 0,
+    val baselinedDebtCount: Long = 0,
+    val reconcilableDebtCount: Long = 0,
+    val conflictedDebtCount: Long = 0,
+    val debtDiscoveryPendingCount: Long = 0,
+    val repaymentsAwaitingBaselineCount: Long = 0,
+    val eligibleRevisionCount: Long = 0,
+    val discoveryScannedCount: Long = 0,
+    val discoveryFailedCount: Long = 0,
+    val debtEvidenceCount: Long = 0,
+    val orphanDebtEvidenceCount: Long = 0,
+    val duplicateDebtSignalCount: Long = 0,
+    val duplicateConfirmedIdentityCount: Long = 0,
+    val nonAuthoritativeBaselineCount: Long = 0,
+    val nonAuthoritativeReconcilableCount: Long = 0,
+    val kernelAsyncFailureCount: Long = 0,
+    val debtAccounts: List<DebtAccountEntity> = emptyList(),
     val lastSweepAtMs: Long? = null,
     val t03Migrated: Boolean = false,
 )
@@ -65,7 +84,7 @@ object LedgerKernel {
         // 因此每个 factory 必须持有独立拷贝。
         database = Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, DB_NAME)
             .openHelperFactory(net.sqlcipher.database.SupportFactory(passphrase.copyOf()))
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
             .build()
         executor.submit { executorThread = Thread.currentThread() }.get(2, TimeUnit.SECONDS)
@@ -85,8 +104,11 @@ object LedgerKernel {
     private val migrationTablesParentFirst = listOf(
         "raw_observation",
         "canonical_transaction",
+        "debt_account",
         "observation_revision",
         "evidence_link",
+        "debt_account_evidence",
+        "account_discovery_scan",
         "ledger_entry",
         "reconciliation_run",
         "coverage_gap",
@@ -114,11 +136,12 @@ object LedgerKernel {
         )
         val encryptedDb = Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, encName)
             .openHelperFactory(net.sqlcipher.database.SupportFactory(passphrase.copyOf()))
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .build()
         try {
             val writable = encryptedDb.openHelper.writableDatabase
             migrationTablesParentFirst.forEach { table ->
+                if (!plaintextTableExists(plain, table)) return@forEach
                 plain.query(table, null, null, null, null, null, null).use { cursor ->
                     val values = android.content.ContentValues()
                     while (cursor.moveToNext()) {
@@ -171,6 +194,12 @@ object LedgerKernel {
         }
     }
 
+    private fun plaintextTableExists(db: android.database.sqlite.SQLiteDatabase, table: String): Boolean =
+        db.rawQuery(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            arrayOf(table),
+        ).use { it.moveToFirst() }
+
     private fun requireDb(): LedgerDatabase =
         database ?: error("LedgerKernel.init() 未调用")
 
@@ -198,6 +227,9 @@ object LedgerKernel {
             }
         }
     }
+
+    private fun accountHash(material: String): String =
+        AccountIdentityHasher.hash(requireNotNull(appContext), material)
 
     // ------------------------------------------------------------------
     // 通知采集（V1.1 §3.1）
@@ -254,6 +286,7 @@ object LedgerKernel {
             is IngestOutcome.Revised,
             -> submitAsync {
                 CandidatePromoter.process(requireDb(), outcome.id)
+                DebtAccountDiscoverer.processPendingForObservation(requireDb(), outcome.id, ::accountHash)
                 refreshStatusBlocking()
             }
         }
@@ -273,7 +306,10 @@ object LedgerKernel {
                     is IngestOutcome.Duplicate -> Unit
                     is IngestOutcome.New,
                     is IngestOutcome.Revised,
-                    -> CandidatePromoter.process(requireDb(), outcome.id)
+                    -> {
+                        CandidatePromoter.process(requireDb(), outcome.id)
+                        DebtAccountDiscoverer.processPendingForObservation(requireDb(), outcome.id, ::accountHash)
+                    }
                 }
             }
             appContext?.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -357,6 +393,14 @@ object LedgerKernel {
         }
     }
 
+    /** M3 历史回扫；内容哈希与解析器版本游标保证无变化时重复执行处理量为 0。 */
+    fun runDebtDiscovery() {
+        submitAsync {
+            DebtAccountDiscoverer.drain(requireDb(), ::accountHash)
+            refreshStatusBlocking()
+        }
+    }
+
     fun markHealthCheck() {
         appContext?.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             ?.edit()?.putLong(PREF_LAST_HEALTH_CHECK_AT, System.currentTimeMillis())?.apply()
@@ -376,6 +420,34 @@ object LedgerKernel {
             pendingParseCount = db.observationDao().countPendingParse(),
             openGapCount = db.coverageGapDao().countOpen(),
             openGaps = db.coverageGapDao().openGaps(),
+            debtAccountCount = db.debtAccountDao().countAll(),
+            suspectedDebtCount = db.debtAccountDao().countByStatus(DebtAccountStatus.SUSPECTED),
+            identifiedDebtCount = db.debtAccountDao().countByStatus(DebtAccountStatus.IDENTIFIED),
+            baselinedDebtCount = db.debtAccountDao().countByStatus(DebtAccountStatus.BASELINED),
+            reconcilableDebtCount = db.debtAccountDao().countByStatus(DebtAccountStatus.RECONCILABLE),
+            conflictedDebtCount = db.debtAccountDao().countByStatus(DebtAccountStatus.CONFLICTED),
+            debtDiscoveryPendingCount = db.debtAccountDao()
+                .countPendingDiscovery(DEBT_DISCOVERY_PARSER_VERSION),
+            repaymentsAwaitingBaselineCount = db.debtAccountDao().countRepaymentsAwaitingBaseline(),
+            eligibleRevisionCount = db.debtAccountDao().countEligibleRevisions(),
+            discoveryScannedCount = db.debtAccountDao().countCurrentScans(),
+            discoveryFailedCount = db.debtAccountDao().countFailedScans(),
+            debtEvidenceCount = db.debtAccountDao().countCurrentEvidence(),
+            orphanDebtEvidenceCount = db.debtAccountDao().countOrphanEvidence(),
+            duplicateDebtSignalCount = db.debtAccountDao().countDuplicateSignalFingerprints(),
+            duplicateConfirmedIdentityCount = db.debtAccountDao().countDuplicateConfirmedIdentities(),
+            nonAuthoritativeBaselineCount = db.debtAccountDao()
+                .countStatusWithoutAuthoritativeEvidence(DebtAccountStatus.BASELINED),
+            nonAuthoritativeReconcilableCount = db.debtAccountDao()
+                .countStatusWithoutAuthoritativeEvidence(DebtAccountStatus.RECONCILABLE),
+            kernelAsyncFailureCount = if (
+                java.io.File(context.filesDir, "kernel_async_failure.txt").exists()
+            ) {
+                1L
+            } else {
+                0L
+            },
+            debtAccounts = db.debtAccountDao().listVisible(),
             lastSweepAtMs = prefs.getLong(PREF_LAST_SWEEP_AT, 0L).takeIf { it > 0L },
             t03Migrated = prefs.getBoolean(PREF_T03_MIGRATED, false),
         )
@@ -384,10 +456,30 @@ object LedgerKernel {
         try {
             java.io.File(context.filesDir, "kernel_status_snapshot.txt").writeText(
                 buildString {
+                    appendLine("schema_version=3")
+                    appendLine("debt_parser_version=$DEBT_DISCOVERY_PARSER_VERSION")
                     appendLine("observations=${snapshot.observationCount}")
+                    appendLine("eligible_revisions=${snapshot.eligibleRevisionCount}")
                     appendLine("candidates=${snapshot.candidateCount}")
                     appendLine("pending_parse=${snapshot.pendingParseCount}")
                     appendLine("open_gaps=${snapshot.openGapCount}")
+                    appendLine("debt_accounts=${snapshot.debtAccountCount}")
+                    appendLine("debt_suspected=${snapshot.suspectedDebtCount}")
+                    appendLine("debt_identified=${snapshot.identifiedDebtCount}")
+                    appendLine("debt_baselined=${snapshot.baselinedDebtCount}")
+                    appendLine("debt_reconcilable=${snapshot.reconcilableDebtCount}")
+                    appendLine("debt_conflicted=${snapshot.conflictedDebtCount}")
+                    appendLine("debt_discovery_pending=${snapshot.debtDiscoveryPendingCount}")
+                    appendLine("repayments_awaiting_baseline=${snapshot.repaymentsAwaitingBaselineCount}")
+                    appendLine("debt_discovery_scanned=${snapshot.discoveryScannedCount}")
+                    appendLine("debt_discovery_failed=${snapshot.discoveryFailedCount}")
+                    appendLine("debt_evidence=${snapshot.debtEvidenceCount}")
+                    appendLine("orphan_debt_evidence=${snapshot.orphanDebtEvidenceCount}")
+                    appendLine("duplicate_debt_signals=${snapshot.duplicateDebtSignalCount}")
+                    appendLine("duplicate_confirmed_identity=${snapshot.duplicateConfirmedIdentityCount}")
+                    appendLine("non_authoritative_baselines=${snapshot.nonAuthoritativeBaselineCount}")
+                    appendLine("non_authoritative_reconcilable=${snapshot.nonAuthoritativeReconcilableCount}")
+                    appendLine("kernel_async_failures=${snapshot.kernelAsyncFailureCount}")
                     appendLine("t03_migrated=${snapshot.t03Migrated}")
                     appendLine("snapshot_at_ms=${System.currentTimeMillis()}")
                 }

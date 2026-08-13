@@ -14,6 +14,8 @@ class PillsApp : Application() {
         LedgerKernel.drainPendingParse()
         // 短信权限已授予时做差量回填（V1.1 §3.2）。
         LedgerKernel.backfillSms(this)
+        // M3：历史观察/修订按解析器版本幂等回扫；新观察仍走实时增量发现。
+        LedgerKernel.runDebtDiscovery()
         HealthCheckWorker.enqueue(this)
         runDebugSelfTests(this)
         if (NotificationListenerState.isNotificationListenerEnabled(this)) {
