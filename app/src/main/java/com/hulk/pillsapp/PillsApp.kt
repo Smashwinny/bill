@@ -15,6 +15,7 @@ class PillsApp : Application() {
         // 短信权限已授予时做差量回填（V1.1 §3.2）。
         LedgerKernel.backfillSms(this)
         HealthCheckWorker.enqueue(this)
+        runDebugSelfTests(this)
         if (NotificationListenerState.isNotificationListenerEnabled(this)) {
             android.service.notification.NotificationListenerService.requestRebind(
                 ComponentName(this, NotificationListenerService::class.java)
