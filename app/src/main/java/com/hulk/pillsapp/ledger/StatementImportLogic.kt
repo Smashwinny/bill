@@ -12,6 +12,7 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
+import java.util.Locale
 import java.util.UUID
 import java.util.zip.ZipException
 import java.util.zip.ZipInputStream
@@ -454,14 +455,31 @@ object StatementFileParser {
     }
 
     private fun secureDocument(bytes: ByteArray): org.w3c.dom.Document {
+        rejectDangerousXml(bytes)
         val factory = DocumentBuilderFactory.newInstance()
         factory.isNamespaceAware = false
-        // 安全特性不可用时直接失败，不能带着可能启用的外部实体继续解析账单。
-        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
-        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)
+        // Android 各版本 XML 工厂支持的 feature 不一致；字节级 DTD/ENTITY 拒绝与
+        // EntityResolver 是跨版本强制边界，平台支持的 feature 再作为纵深防御。
+        runCatching { factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
+        runCatching { factory.setFeature("http://xml.org/sax/features/external-general-entities", false) }
+        runCatching { factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
         factory.isExpandEntityReferences = false
-        return factory.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
+        val builder = factory.newDocumentBuilder()
+        builder.setEntityResolver { _, _ -> throw org.xml.sax.SAXException("外部实体已禁用") }
+        return builder.parse(ByteArrayInputStream(bytes))
+    }
+
+    private fun rejectDangerousXml(bytes: ByteArray) {
+        val decoded = when {
+            bytes.size >= 2 && bytes[0] == 0xff.toByte() && bytes[1] == 0xfe.toByte() ->
+                String(bytes, Charsets.UTF_16LE)
+            bytes.size >= 2 && bytes[0] == 0xfe.toByte() && bytes[1] == 0xff.toByte() ->
+                String(bytes, Charsets.UTF_16BE)
+            else -> String(bytes, Charsets.UTF_8)
+        }.uppercase(Locale.ROOT)
+        if ("<!DOCTYPE" in decoded || "<!ENTITY" in decoded) {
+            throw StatementParseException(StatementPreviewIssue.MALFORMED_TABLE)
+        }
     }
 
     private fun descendantText(node: org.w3c.dom.Node, tag: String): String {

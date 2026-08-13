@@ -250,6 +250,19 @@ class StatementImportLogicTest {
     }
 
     @Test
+    fun xlsxWithDoctypeOrEntityIsRejected() {
+        val dangerous = xlsx(
+            sharedStrings = emptyList(),
+            sheetXml = "<!DOCTYPE x [<!ENTITY leak SYSTEM \"file:///etc/passwd\">]>" +
+                "<worksheet><sheetData><row><c r=\"A1\" t=\"inlineStr\"><is><t>&leak;</t></is></c></row></sheetData></worksheet>",
+        )
+        assertEquals(
+            listOf(StatementPreviewIssue.MALFORMED_TABLE),
+            StatementFileParser.parse("dangerous.xlsx", dangerous).issues,
+        )
+    }
+
+    @Test
     fun coverageAuditShowsObservationGapAndImportedPeriodSeparately() {
         val raw = listOf(
             RawSourceCoverageSummary(
