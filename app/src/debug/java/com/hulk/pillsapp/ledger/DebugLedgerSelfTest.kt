@@ -14,20 +14,30 @@ object DebugLedgerSelfTest {
 
     fun run(context: Context) {
         val report = File(context.filesDir, "debug_ledger_self_test.txt")
+        var phase = "open_database"
         try {
             context.deleteDatabase(DB_NAME)
             val db = Room.databaseBuilder(context, LedgerDatabase::class.java, DB_NAME)
                 .allowMainThreadQueries()
                 .build()
             try {
+                phase = "revision_one_candidate"
                 revisionKeepsOneCandidate(db)
+                phase = "duplicate_counter"
                 duplicateOnlyIncrementsCounter(db)
+                phase = "gap_close"
                 closingGapLeavesNoActiveGap(db)
+                phase = "debt_discovery"
                 debtDiscoveryIsAuditableAndIdempotent(db)
+                phase = "parser_upgrade"
                 parserUpgradeRetiresWrongTailWithoutDeletingAudit(db)
+                phase = "statement_xlsx_android"
                 statementXlsxParserWorksOnDevice()
+                phase = "statement_artifact_256k"
                 statementArtifactChunkBoundaryWorksOnDevice()
+                phase = "statement_import"
                 statementImportIsAuditableAndDoesNotPostLedger(db)
+                phase = "complete"
                 report.writeText(
                     "result=PASS\n" +
                         "tests=revision_one_candidate,duplicate_counter,gap_close,debt_discovery_audit,debt_discovery_idempotence,no_false_baseline,parser_upgrade_retires_wrong_tail,statement_xlsx_android,statement_artifact_256k,statement_import_idempotence,statement_parser_reparse,no_row_occurrence_merge,no_import_auto_posting\n" +
@@ -40,6 +50,7 @@ object DebugLedgerSelfTest {
         } catch (failure: Throwable) {
             report.writeText(
                 "result=FAIL\n" +
+                    "phase=$phase\n" +
                     "type=${failure.javaClass.name}\n" +
                     "at_ms=${System.currentTimeMillis()}\n"
             )
