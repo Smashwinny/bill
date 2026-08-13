@@ -16,8 +16,12 @@ import androidx.room.RoomDatabase
         ReconciliationRunEntity::class,
         CoverageGapEntity::class,
         NotificationRemovalEntity::class,
+        StatementImportEntity::class,
+        StatementArtifactChunkEntity::class,
+        StatementRowEntity::class,
+        StatementImportRowEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class LedgerDatabase : RoomDatabase() {
@@ -26,6 +30,7 @@ abstract class LedgerDatabase : RoomDatabase() {
     abstract fun debtAccountDao(): DebtAccountDao
     abstract fun coverageGapDao(): CoverageGapDao
     abstract fun notificationRemovalDao(): NotificationRemovalDao
+    abstract fun statementDao(): StatementDao
 }
 
 val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
@@ -119,6 +124,73 @@ val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
         db.execSQL(
             "CREATE INDEX IF NOT EXISTS `index_account_discovery_scan_observation_id_is_current` " +
                 "ON `account_discovery_scan` (`observation_id`, `is_current`)"
+        )
+    }
+}
+
+val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `statement_import` (" +
+                "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `public_id` TEXT NOT NULL, " +
+                "`file_hash` TEXT NOT NULL, `display_name` TEXT NOT NULL, `source_kind` TEXT NOT NULL, " +
+                "`format` TEXT NOT NULL, `parser_version` INTEGER NOT NULL, `authority` TEXT NOT NULL, " +
+                "`status` TEXT NOT NULL, `observed_row_from_ms` INTEGER NOT NULL, " +
+                "`observed_row_to_ms` INTEGER NOT NULL, `raw_row_count` INTEGER NOT NULL, " +
+                "`valid_row_count` INTEGER NOT NULL, `invalid_row_count` INTEGER NOT NULL, " +
+                "`ignored_footer_row_count` INTEGER NOT NULL, " +
+                "`duplicate_row_count` INTEGER NOT NULL, `artifact_size_bytes` INTEGER NOT NULL, " +
+                "`artifact_chunk_count` INTEGER NOT NULL, `imported_at_ms` INTEGER NOT NULL)"
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_statement_import_public_id` " +
+                "ON `statement_import` (`public_id`)"
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_statement_import_file_hash_parser_version` " +
+                "ON `statement_import` (`file_hash`, `parser_version`)"
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `statement_artifact_chunk` (" +
+                "`import_id` INTEGER NOT NULL, `chunk_index` INTEGER NOT NULL, " +
+                "`chunk_hash` TEXT NOT NULL, `bytes` BLOB NOT NULL, " +
+                "PRIMARY KEY(`import_id`, `chunk_index`), " +
+                "FOREIGN KEY(`import_id`) REFERENCES `statement_import`(`id`) " +
+                "ON UPDATE NO ACTION ON DELETE NO ACTION)"
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `statement_row` (" +
+                "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `source_kind` TEXT NOT NULL, " +
+                "`row_fingerprint` TEXT NOT NULL, `external_id_hash` TEXT, " +
+                "`occurred_at_ms` INTEGER NOT NULL, `amount_cents` INTEGER NOT NULL, " +
+                "`currency` TEXT NOT NULL, `direction` TEXT NOT NULL, `tx_type` TEXT NOT NULL, " +
+                "`tx_status` TEXT NOT NULL, `counterparty` TEXT, `item_description` TEXT, " +
+                "`raw_record` TEXT NOT NULL, `created_at_ms` INTEGER NOT NULL)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_statement_row_row_fingerprint` " +
+                "ON `statement_row` (`row_fingerprint`)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_statement_row_external_id_hash` " +
+                "ON `statement_row` (`external_id_hash`)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_statement_row_occurred_at_ms` " +
+                "ON `statement_row` (`occurred_at_ms`)"
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `statement_import_row` (" +
+                "`import_id` INTEGER NOT NULL, `row_id` INTEGER NOT NULL, " +
+                "`source_row_number` INTEGER NOT NULL, PRIMARY KEY(`import_id`, `source_row_number`), " +
+                "FOREIGN KEY(`import_id`) REFERENCES `statement_import`(`id`) " +
+                "ON UPDATE NO ACTION ON DELETE NO ACTION, " +
+                "FOREIGN KEY(`row_id`) REFERENCES `statement_row`(`id`) " +
+                "ON UPDATE NO ACTION ON DELETE NO ACTION)"
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_statement_import_row_row_id` " +
+                "ON `statement_import_row` (`row_id`)"
         )
     }
 }

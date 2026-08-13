@@ -8,6 +8,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hulk.pillsapp.sha256Hex
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -244,5 +246,173 @@ class LedgerDatabaseInstrumentedTest {
         DebtAccountDiscoverer.drain(db, ::sha256Hex)
         assertEquals(0L, db.debtAccountDao().countAll())
         assertEquals(0L, db.debtAccountDao().countPendingDiscovery(DEBT_DISCOVERY_PARSER_VERSION))
+    }
+
+    @Test
+    fun migrationThreeToFourPreservesRowsAndCreatesEmptyStatementTables() {
+        val name = "migration-3-4.db"
+        migrationHelper.createDatabase(name, 3).apply {
+            execSQL(
+                "INSERT INTO raw_observation(id, source, source_key, user_handle, package_name, post_time_ms, received_at_ms, title, body, content_hash, capture_path, parse_state, duplicate_count, created_at_ms) " +
+                    "VALUES(1, 'NOTIFICATION', '0:key', 0, 'com.example.pay', 1000, 1001, '支付', '10元', 'h', 'LIVE_CALLBACK', 'PARSED', 0, 1001)"
+            )
+            close()
+        }
+        migrationHelper.runMigrationsAndValidate(name, 4, true, MIGRATION_3_4).use { migrated ->
+            migrated.query("SELECT COUNT(*) FROM raw_observation").use {
+                it.moveToFirst()
+                assertEquals(1, it.getInt(0))
+            }
+            listOf(
+                "statement_import", "statement_artifact_chunk", "statement_row", "statement_import_row"
+            ).forEach { table ->
+                migrated.query("SELECT COUNT(*) FROM $table").use {
+                    it.moveToFirst()
+                    assertEquals(0, it.getInt(0))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun statementImportIsIdempotentPerParserButNeverMergesRowOccurrences() {
+        val now = 1000L
+        fun imported(hash: String, publicId: String) = StatementImportEntity(
+            publicId = publicId,
+            fileHash = hash,
+            displayName = "statement.csv",
+            sourceKind = StatementSourceKind.WECHAT,
+            format = StatementFormat.WECHAT_CSV,
+            parserVersion = STATEMENT_PARSER_VERSION,
+            authority = StatementAuthority.FORMAT_RECOGNIZED_UNVERIFIED,
+            status = StatementImportStatus.IMPORTING,
+            observedRowFromMs = now,
+            observedRowToMs = now,
+            rawRowCount = 1,
+            validRowCount = 1,
+            invalidRowCount = 0,
+            ignoredFooterRowCount = 0,
+            duplicateRowCount = 0,
+            artifactSizeBytes = 0,
+            artifactChunkCount = 0,
+            importedAtMs = now,
+        )
+        val row = StatementRowEntity(
+            sourceKind = StatementSourceKind.WECHAT,
+            rowFingerprint = "row-fingerprint",
+            externalIdHash = "external-id-hash",
+            occurredAtMs = now,
+            amountCents = 1000,
+            currency = "CNY",
+            direction = StatementDirection.OUT,
+            txType = TxType.PAYMENT,
+            txStatus = "支付成功",
+            counterparty = "测试商户",
+            itemDescription = "测试商品",
+            rawRecord = "encrypted-db-only",
+            createdAtMs = now,
+        )
+        fun complete(entity: StatementImportEntity, rows: List<Pair<Int, StatementRowEntity>>): StatementPrepareResult {
+            val prepared = db.statementDao().prepareImport(entity)
+            if (!prepared.duplicateCompleted) {
+                if (entity.artifactChunkCount == 1) {
+                    val chunk = StatementArtifactChunkEntity(prepared.importId, 0, "chunk-hash", byteArrayOf(1, 2, 3))
+                    db.statementDao().appendArtifactChunk(chunk)
+                    db.statementDao().appendArtifactChunk(chunk)
+                }
+                db.statementDao().appendRowBatch(prepared.importId, rows)
+                db.statementDao().finalizeImport(prepared.importId, entity.artifactChunkCount, rows.size)
+            }
+            return prepared
+        }
+        val twoRows = imported("file-one", "import-one").copy(
+            rawRowCount = 2,
+            validRowCount = 2,
+            artifactSizeBytes = 3,
+            artifactChunkCount = 1,
+        )
+        val first = complete(twoRows, listOf(2 to row, 3 to row))
+        val sameFile = complete(twoRows.copy(publicId = "import-two"), listOf(2 to row))
+        val overlap = complete(imported("file-two", "import-three"), listOf(2 to row))
+        val parserUpgrade = complete(
+            imported("file-one", "import-four").copy(parserVersion = STATEMENT_PARSER_VERSION + 1),
+            listOf(2 to row.copy(txStatus = "退款成功")),
+        )
+        val incomplete = db.statementDao().prepareImport(imported("file-incomplete", "import-five"))
+        db.statementDao().appendRowBatch(incomplete.importId, listOf(2 to row))
+
+        assertFalse(first.duplicateCompleted)
+        assertTrue(sameFile.duplicateCompleted)
+        assertFalse(overlap.duplicateCompleted)
+        assertFalse(parserUpgrade.duplicateCompleted)
+        assertEquals(4L, db.statementDao().countImports())
+        assertEquals(4L, db.statementDao().countRows())
+        assertEquals(1L, db.statementDao().countIncompleteImports())
+        assertEquals(0L, db.statementDao().countCompletedIntegrityFailures())
+        assertEquals(0L, db.statementDao().countOrphanLinks())
+        assertEquals(0L, db.canonicalDao().countAll())
+        assertEquals(0L, db.debtAccountDao().countByStatus(DebtAccountStatus.BASELINED))
+    }
+
+    @Test
+    fun interruptedImportResumesIdempotentlyAndRejectsChangedSourceRow() {
+        val base = StatementImportEntity(
+            publicId = "resume-one",
+            fileHash = "resume-file",
+            displayName = "resume.csv",
+            sourceKind = StatementSourceKind.WECHAT,
+            format = StatementFormat.WECHAT_CSV,
+            parserVersion = STATEMENT_PARSER_VERSION,
+            authority = StatementAuthority.FORMAT_RECOGNIZED_UNVERIFIED,
+            status = StatementImportStatus.IMPORTING,
+            observedRowFromMs = 1000,
+            observedRowToMs = 2000,
+            rawRowCount = 2,
+            validRowCount = 2,
+            invalidRowCount = 0,
+            ignoredFooterRowCount = 0,
+            duplicateRowCount = 0,
+            artifactSizeBytes = 3,
+            artifactChunkCount = 1,
+            importedAtMs = 1000,
+        )
+        fun row(fingerprint: String, at: Long) = StatementRowEntity(
+            sourceKind = StatementSourceKind.WECHAT,
+            rowFingerprint = fingerprint,
+            externalIdHash = null,
+            occurredAtMs = at,
+            amountCents = 1000,
+            currency = "CNY",
+            direction = StatementDirection.OUT,
+            txType = TxType.PAYMENT,
+            txStatus = "支付成功",
+            counterparty = null,
+            itemDescription = null,
+            rawRecord = fingerprint,
+            createdAtMs = at,
+        )
+        val dao = db.statementDao()
+        val first = dao.prepareImport(base)
+        val chunk = StatementArtifactChunkEntity(first.importId, 0, "chunk", byteArrayOf(1, 2, 3))
+        dao.appendArtifactChunk(chunk)
+        dao.appendRowBatch(first.importId, listOf(2 to row("row-2", 1000)))
+        assertEquals(1, dao.markFailed(first.importId))
+
+        val resumed = dao.prepareImport(base.copy(publicId = "resume-two"))
+        assertEquals(first.importId, resumed.importId)
+        assertFalse(resumed.duplicateCompleted)
+        dao.appendArtifactChunk(chunk)
+        val replay = dao.appendRowBatch(first.importId, listOf(2 to row("row-2", 1000)))
+        assertEquals(1, replay.existingRows)
+        val conflict = runCatching {
+            dao.appendRowBatch(first.importId, listOf(2 to row("changed-row-2", 1000)))
+        }
+        assertTrue(conflict.isFailure)
+        dao.appendRowBatch(first.importId, listOf(3 to row("row-3", 2000)))
+        dao.finalizeImport(first.importId, 1, 2)
+
+        assertEquals(0L, dao.countIncompleteImports())
+        assertEquals(2L, dao.countRows())
+        assertEquals(0L, dao.countCompletedIntegrityFailures())
     }
 }

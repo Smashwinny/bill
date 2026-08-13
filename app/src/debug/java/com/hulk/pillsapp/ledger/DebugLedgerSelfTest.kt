@@ -4,6 +4,9 @@ import android.content.Context
 import androidx.room.Room
 import com.hulk.pillsapp.sha256Hex
 import java.io.File
+import java.io.ByteArrayOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /** Debug APK 本机自检；只使用独立临时库，报告不含任何用户数据。 */
 object DebugLedgerSelfTest {
@@ -22,9 +25,12 @@ object DebugLedgerSelfTest {
                 closingGapLeavesNoActiveGap(db)
                 debtDiscoveryIsAuditableAndIdempotent(db)
                 parserUpgradeRetiresWrongTailWithoutDeletingAudit(db)
+                statementXlsxParserWorksOnDevice()
+                statementArtifactChunkBoundaryWorksOnDevice()
+                statementImportIsAuditableAndDoesNotPostLedger(db)
                 report.writeText(
                     "result=PASS\n" +
-                        "tests=revision_one_candidate,duplicate_counter,gap_close,debt_discovery_audit,debt_discovery_idempotence,no_false_baseline,parser_upgrade_retires_wrong_tail\n" +
+                        "tests=revision_one_candidate,duplicate_counter,gap_close,debt_discovery_audit,debt_discovery_idempotence,no_false_baseline,parser_upgrade_retires_wrong_tail,statement_xlsx_android,statement_artifact_256k,statement_import_idempotence,statement_parser_reparse,no_row_occurrence_merge,no_import_auto_posting\n" +
                         "at_ms=${System.currentTimeMillis()}\n"
                 )
             } finally {
@@ -178,5 +184,91 @@ object DebugLedgerSelfTest {
         check(db.debtAccountDao().findById(oldAccountId)?.status == DebtAccountStatus.DORMANT)
         check(db.debtAccountDao().countEvidenceHistoryForObservation(observationId) == 2L)
         check(db.debtAccountDao().listVisible().none { it.id == oldAccountId })
+    }
+
+    private fun statementImportIsAuditableAndDoesNotPostLedger(db: LedgerDatabase) {
+        val canonicalBefore = db.canonicalDao().countAll()
+        val baselineBefore = db.debtAccountDao().countByStatus(DebtAccountStatus.BASELINED)
+        val csv = """
+            #微信支付账单明细
+            交易时间,交易类型,交易对方,商品,收/支,金额(元),当前状态,交易单号
+            2026-08-01 12:30:00,商户消费,自检商户,自检商品,支出,10.00,支付成功,SELF-WX-1
+            2026-08-01 12:30:00,商户消费,自检商户,自检商品,支出,10.00,支付成功,SELF-WX-1
+        """.trimIndent()
+        val preview = StatementFileParser.parse("self-test-wechat.csv", csv.toByteArray())
+        check(preview.canImport)
+        val now = System.currentTimeMillis()
+        fun completeImport(entity: StatementImportEntity, rows: List<Pair<Int, StatementRowEntity>>): StatementPrepareResult {
+            val prepared = db.statementDao().prepareImport(
+                entity.copy(
+                    rawRowCount = rows.size,
+                    validRowCount = rows.size,
+                    artifactSizeBytes = 0,
+                    artifactChunkCount = 0,
+                )
+            )
+            if (!prepared.duplicateCompleted) {
+                db.statementDao().appendRowBatch(prepared.importId, rows)
+                db.statementDao().finalizeImport(prepared.importId, 0, rows.size)
+            }
+            return prepared
+        }
+        val first = completeImport(preview.toImportEntity(now), preview.toRowEntities(now))
+        val second = completeImport(preview.toImportEntity(now + 1), preview.toRowEntities(now + 1))
+        val parserUpgrade = completeImport(
+            preview.toImportEntity(now + 2).copy(parserVersion = STATEMENT_PARSER_VERSION + 1),
+            preview.toRowEntities(now + 2),
+        )
+        check(!first.duplicateCompleted)
+        check(second.duplicateCompleted)
+        check(!parserUpgrade.duplicateCompleted)
+        check(db.statementDao().countImports() == 2L)
+        check(db.statementDao().countRows() == 4L)
+        check(db.statementDao().countAwaitingValidation() == 2L)
+        check(db.statementDao().countCompletedIntegrityFailures() == 0L)
+        check(db.statementDao().countOrphanLinks() == 0L)
+        check(db.canonicalDao().countAll() == canonicalBefore)
+        check(db.debtAccountDao().countByStatus(DebtAccountStatus.BASELINED) == baselineBefore)
+    }
+
+    private fun statementXlsxParserWorksOnDevice() {
+        val output = ByteArrayOutputStream()
+        ZipOutputStream(output).use { zip ->
+            fun entry(name: String, text: String) {
+                zip.putNextEntry(ZipEntry(name))
+                zip.write(text.toByteArray())
+                zip.closeEntry()
+            }
+            entry("xl/workbook.xml", "<workbook/>")
+            entry(
+                "xl/sharedStrings.xml",
+                "<sst><si><t>微信支付账单明细</t></si><si><t>交易时间</t></si><si><t>交易单号</t></si>" +
+                    "<si><t>当前状态</t></si><si><t>金额(元)</t></si><si><t>收/支</t></si>" +
+                    "<si><t>SELF-XLSX</t></si><si><t>支付成功</t></si><si><t>支出</t></si></sst>",
+            )
+            entry(
+                "xl/worksheets/sheet1.xml",
+                "<worksheet><sheetData>" +
+                    "<row><c r=\"A1\" t=\"s\"><v>0</v></c></row>" +
+                    "<row><c r=\"A2\" t=\"s\"><v>1</v></c><c r=\"B2\" t=\"s\"><v>2</v></c>" +
+                    "<c r=\"C2\" t=\"s\"><v>3</v></c><c r=\"D2\" t=\"s\"><v>4</v></c>" +
+                    "<c r=\"E2\" t=\"s\"><v>5</v></c></row>" +
+                    "<row><c r=\"A3\"><v>46235.5</v></c><c r=\"B3\" t=\"s\"><v>6</v></c>" +
+                    "<c r=\"C3\" t=\"s\"><v>7</v></c><c r=\"D3\"><v>8.88</v></c>" +
+                    "<c r=\"E3\" t=\"s\"><v>8</v></c></row>" +
+                    "</sheetData></worksheet>",
+            )
+        }
+        val preview = StatementFileParser.parse("self-test.xlsx", output.toByteArray())
+        check(preview.canImport)
+        check(preview.rows.single().amountCents == 888L)
+    }
+
+    private fun statementArtifactChunkBoundaryWorksOnDevice() {
+        val bytes = ByteArray(STATEMENT_ARTIFACT_CHUNK_BYTES + 1) { index -> (index % 251).toByte() }
+        val hashes = StatementFileParser.artifactChunkHashes(bytes)
+        check(hashes.size == 2)
+        check(hashes.all { it.length == 64 })
+        check(hashes[0] != hashes[1])
     }
 }

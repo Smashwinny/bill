@@ -37,6 +37,33 @@ enum class TxType { PAYMENT, REFUND, TRANSFER, FEE, REVERSAL, INCOME, UNKNOWN }
 
 enum class GapState { ACTIVE, CLOSED, BACKFILLED }
 
+enum class StatementSourceKind { ALIPAY, WECHAT, BANK, UNKNOWN }
+
+enum class StatementFormat {
+    ALIPAY_CSV,
+    ALIPAY_XLSX,
+    WECHAT_CSV,
+    WECHAT_XLSX,
+    BANK_CSV,
+    BANK_XLSX,
+}
+
+enum class StatementAuthority {
+    FORMAT_RECOGNIZED_UNVERIFIED,
+    PERIOD_VALIDATED,
+    AUTHORITATIVE,
+}
+
+enum class StatementImportStatus {
+    IMPORTING,
+    IMPORT_FAILED,
+    IMPORTED_UNVERIFIED,
+    PERIOD_VALIDATED,
+    RECONCILED,
+}
+
+enum class StatementDirection { OUT, IN, NEUTRAL, UNKNOWN }
+
 object GapDetectors {
     const val LISTENER_CALLBACK = "LISTENER_CALLBACK"
     const val BOOT_CHECK = "BOOT_CHECK"
@@ -280,4 +307,109 @@ data class NotificationRemovalEntity(
     @ColumnInfo(name = "user_handle") val userHandle: Int,
     val reason: Int,
     @ColumnInfo(name = "removed_at_ms") val removedAtMs: Long,
+)
+
+/** M4.0 文件级审计；文件选择器不能证明官方来源，首次导入只能是待校验状态。 */
+@Entity(
+    tableName = "statement_import",
+    indices = [
+        Index(value = ["public_id"], unique = true),
+        // 同一解析器重复选择同一文件幂等；解析器升级后必须允许形成新的审计批次。
+        Index(value = ["file_hash", "parser_version"], unique = true),
+    ],
+)
+data class StatementImportEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "public_id") val publicId: String,
+    @ColumnInfo(name = "file_hash") val fileHash: String,
+    @ColumnInfo(name = "display_name") val displayName: String,
+    @ColumnInfo(name = "source_kind") val sourceKind: StatementSourceKind,
+    val format: StatementFormat,
+    @ColumnInfo(name = "parser_version") val parserVersion: Int,
+    val authority: StatementAuthority,
+    val status: StatementImportStatus,
+    /** 仅为文件内最早/最晚交易行时间，不代表官方账期边界或完整覆盖。 */
+    @ColumnInfo(name = "observed_row_from_ms") val observedRowFromMs: Long,
+    @ColumnInfo(name = "observed_row_to_ms") val observedRowToMs: Long,
+    @ColumnInfo(name = "raw_row_count") val rawRowCount: Int,
+    @ColumnInfo(name = "valid_row_count") val validRowCount: Int,
+    @ColumnInfo(name = "invalid_row_count") val invalidRowCount: Int,
+    @ColumnInfo(name = "ignored_footer_row_count") val ignoredFooterRowCount: Int,
+    @ColumnInfo(name = "duplicate_row_count") val duplicateRowCount: Int,
+    @ColumnInfo(name = "artifact_size_bytes") val artifactSizeBytes: Int,
+    @ColumnInfo(name = "artifact_chunk_count") val artifactChunkCount: Int,
+    @ColumnInfo(name = "imported_at_ms") val importedAtMs: Long,
+)
+
+/** 原始选择文件的加密分块；保留元数据、表头和页脚，供后续账户/账期复核。 */
+@Entity(
+    tableName = "statement_artifact_chunk",
+    primaryKeys = ["import_id", "chunk_index"],
+    foreignKeys = [
+        ForeignKey(
+            entity = StatementImportEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["import_id"],
+            onDelete = ForeignKey.NO_ACTION,
+        ),
+    ],
+)
+data class StatementArtifactChunkEntity(
+    @ColumnInfo(name = "import_id") val importId: Long,
+    @ColumnInfo(name = "chunk_index") val chunkIndex: Int,
+    @ColumnInfo(name = "chunk_hash") val chunkHash: String,
+    val bytes: ByteArray,
+)
+
+/** 账单中的不可变原始/归一化行；原文只位于 SQLCipher 加密数据库。 */
+@Entity(
+    tableName = "statement_row",
+    indices = [
+        // 无账户作用域时，相同内容可能是两笔真实交易；指纹只用于审计，不能跨文件去重。
+        Index(value = ["row_fingerprint"]),
+        Index(value = ["external_id_hash"]),
+        Index(value = ["occurred_at_ms"]),
+    ],
+)
+data class StatementRowEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "source_kind") val sourceKind: StatementSourceKind,
+    @ColumnInfo(name = "row_fingerprint") val rowFingerprint: String,
+    @ColumnInfo(name = "external_id_hash") val externalIdHash: String?,
+    @ColumnInfo(name = "occurred_at_ms") val occurredAtMs: Long,
+    @ColumnInfo(name = "amount_cents") val amountCents: Long,
+    val currency: String,
+    val direction: StatementDirection,
+    @ColumnInfo(name = "tx_type") val txType: TxType,
+    @ColumnInfo(name = "tx_status") val txStatus: String,
+    @ColumnInfo(name = "counterparty") val counterparty: String?,
+    @ColumnInfo(name = "item_description") val itemDescription: String?,
+    @ColumnInfo(name = "raw_record") val rawRecord: String,
+    @ColumnInfo(name = "created_at_ms") val createdAtMs: Long,
+)
+
+/** 保留重叠账期中“哪份文件包含哪些行”的审计关系。 */
+@Entity(
+    tableName = "statement_import_row",
+    primaryKeys = ["import_id", "source_row_number"],
+    foreignKeys = [
+        ForeignKey(
+            entity = StatementImportEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["import_id"],
+            onDelete = ForeignKey.NO_ACTION,
+        ),
+        ForeignKey(
+            entity = StatementRowEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["row_id"],
+            onDelete = ForeignKey.NO_ACTION,
+        ),
+    ],
+    indices = [Index(value = ["row_id"], unique = true)],
+)
+data class StatementImportRowEntity(
+    @ColumnInfo(name = "import_id") val importId: Long,
+    @ColumnInfo(name = "row_id") val rowId: Long,
+    @ColumnInfo(name = "source_row_number") val sourceRowNumber: Int,
 )

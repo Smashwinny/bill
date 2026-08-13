@@ -29,6 +29,34 @@ data class DebtDiscoveryInput(
     @androidx.room.ColumnInfo(name = "revision_at_ms") val revisionAtMs: Long,
 )
 
+data class RawSourceCoverageSummary(
+    val source: ObservationSource,
+    @androidx.room.ColumnInfo(name = "user_handle") val userHandle: Int,
+    @androidx.room.ColumnInfo(name = "source_namespace") val sourceNamespace: String,
+    @androidx.room.ColumnInfo(name = "observation_count") val observationCount: Long,
+    @androidx.room.ColumnInfo(name = "first_seen_at_ms") val firstSeenAtMs: Long,
+    @androidx.room.ColumnInfo(name = "last_seen_at_ms") val lastSeenAtMs: Long,
+    @androidx.room.ColumnInfo(name = "transaction_evidence_count") val transactionEvidenceCount: Long,
+    @androidx.room.ColumnInfo(name = "debt_evidence_count") val debtEvidenceCount: Long,
+)
+
+data class StatementImportSummary(
+    val id: Long,
+    @androidx.room.ColumnInfo(name = "display_name") val displayName: String,
+    @androidx.room.ColumnInfo(name = "source_kind") val sourceKind: StatementSourceKind,
+    val format: StatementFormat,
+    val authority: StatementAuthority,
+    val status: StatementImportStatus,
+    @androidx.room.ColumnInfo(name = "observed_row_from_ms") val observedRowFromMs: Long,
+    @androidx.room.ColumnInfo(name = "observed_row_to_ms") val observedRowToMs: Long,
+    @androidx.room.ColumnInfo(name = "valid_row_count") val validRowCount: Int,
+    @androidx.room.ColumnInfo(name = "invalid_row_count") val invalidRowCount: Int,
+    @androidx.room.ColumnInfo(name = "ignored_footer_row_count") val ignoredFooterRowCount: Int,
+    @androidx.room.ColumnInfo(name = "duplicate_row_count") val duplicateRowCount: Int,
+    @androidx.room.ColumnInfo(name = "linked_row_count") val linkedRowCount: Long,
+    @androidx.room.ColumnInfo(name = "imported_at_ms") val importedAtMs: Long,
+)
+
 @Dao
 abstract class ObservationDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
@@ -130,6 +158,23 @@ abstract class ObservationDao {
 
     @Query("SELECT COUNT(*) FROM observation_revision WHERE observation_id = :observationId")
     abstract fun countRevisions(observationId: Long): Long
+
+    @Query(
+        "SELECT raw_observation.source AS source, raw_observation.user_handle AS user_handle, " +
+            "raw_observation.package_name AS source_namespace, " +
+            "COUNT(DISTINCT raw_observation.id) AS observation_count, " +
+            "MIN(raw_observation.post_time_ms) AS first_seen_at_ms, " +
+            "MAX(raw_observation.post_time_ms) AS last_seen_at_ms, " +
+            "COUNT(DISTINCT evidence_link.id) AS transaction_evidence_count, " +
+            "COUNT(DISTINCT debt_account_evidence.id) AS debt_evidence_count " +
+            "FROM raw_observation " +
+            "LEFT JOIN evidence_link ON evidence_link.observation_id = raw_observation.id " +
+            "LEFT JOIN debt_account_evidence ON debt_account_evidence.observation_id = raw_observation.id " +
+            "AND debt_account_evidence.is_current = 1 " +
+            "GROUP BY raw_observation.source, raw_observation.user_handle, raw_observation.package_name " +
+            "ORDER BY last_seen_at_ms DESC"
+    )
+    abstract fun sourceCoverageSummaries(): List<RawSourceCoverageSummary>
 }
 
 @Dao
@@ -359,6 +404,216 @@ abstract class DebtAccountDao {
             "AND debt_account.status NOT IN ('BASELINED', 'RECONCILABLE')"
     )
     abstract fun countRepaymentsAwaitingBaseline(): Long
+}
+
+data class StatementCommitResult(
+    val importId: Long,
+    val duplicateFile: Boolean,
+    val insertedRows: Int,
+    val duplicateRows: Int,
+)
+
+data class StatementPrepareResult(
+    val importId: Long,
+    val duplicateCompleted: Boolean,
+)
+
+data class StatementRowBatchResult(
+    val insertedRows: Int,
+    val existingRows: Int,
+)
+
+@Dao
+abstract class StatementDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    protected abstract fun insertImportIgnore(entity: StatementImportEntity): Long
+
+    @Insert
+    protected abstract fun insertRow(entity: StatementRowEntity): Long
+
+    @Insert
+    protected abstract fun insertImportRow(entity: StatementImportRowEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    protected abstract fun insertArtifactChunkIgnore(entity: StatementArtifactChunkEntity): Long
+
+    @Query(
+        "SELECT * FROM statement_import WHERE file_hash = :fileHash " +
+            "AND parser_version = :parserVersion LIMIT 1"
+    )
+    abstract fun findImportByFileHashAndParser(
+        fileHash: String,
+        parserVersion: Int,
+    ): StatementImportEntity?
+
+    @Query("SELECT * FROM statement_import WHERE id = :importId LIMIT 1")
+    protected abstract fun findImportById(importId: Long): StatementImportEntity?
+
+    @Query(
+        "SELECT chunk_hash FROM statement_artifact_chunk WHERE import_id = :importId " +
+            "AND chunk_index = :chunkIndex LIMIT 1"
+    )
+    protected abstract fun findChunkHash(importId: Long, chunkIndex: Int): String?
+
+    @Query(
+        "SELECT statement_row.row_fingerprint FROM statement_import_row INNER JOIN statement_row " +
+            "ON statement_row.id = statement_import_row.row_id " +
+            "WHERE statement_import_row.import_id = :importId " +
+            "AND statement_import_row.source_row_number = :sourceRowNumber LIMIT 1"
+    )
+    protected abstract fun findLinkedRowFingerprint(importId: Long, sourceRowNumber: Int): String?
+
+    @Query("SELECT COUNT(*) FROM statement_artifact_chunk WHERE import_id = :importId")
+    protected abstract fun countArtifactChunks(importId: Long): Long
+
+    @Query("SELECT COUNT(*) FROM statement_import_row WHERE import_id = :importId")
+    protected abstract fun countLinkedRows(importId: Long): Long
+
+    @Query(
+        "UPDATE statement_import SET status = 'IMPORTED_UNVERIFIED' " +
+            "WHERE id = :importId AND status IN ('IMPORTING', 'IMPORT_FAILED')"
+    )
+    protected abstract fun markCompleted(importId: Long): Int
+
+    @Query(
+        "UPDATE statement_import SET status = 'IMPORT_FAILED' " +
+            "WHERE id = :importId AND status = 'IMPORTING'"
+    )
+    abstract fun markFailed(importId: Long): Int
+
+    @Query("UPDATE statement_import SET status = 'IMPORTING' WHERE id = :importId AND status = 'IMPORT_FAILED'")
+    protected abstract fun markResuming(importId: Long): Int
+
+    @Query(
+        "SELECT statement_import.id AS id, statement_import.display_name AS display_name, " +
+            "statement_import.source_kind AS source_kind, statement_import.format AS format, " +
+            "statement_import.authority AS authority, statement_import.status AS status, " +
+            "statement_import.observed_row_from_ms AS observed_row_from_ms, " +
+            "statement_import.observed_row_to_ms AS observed_row_to_ms, " +
+            "statement_import.valid_row_count AS valid_row_count, " +
+            "statement_import.invalid_row_count AS invalid_row_count, " +
+            "statement_import.ignored_footer_row_count AS ignored_footer_row_count, " +
+            "statement_import.duplicate_row_count AS duplicate_row_count, " +
+            "COUNT(statement_import_row.row_id) AS linked_row_count, " +
+            "statement_import.imported_at_ms AS imported_at_ms " +
+            "FROM statement_import LEFT JOIN statement_import_row " +
+            "ON statement_import_row.import_id = statement_import.id " +
+            "GROUP BY statement_import.id ORDER BY statement_import.imported_at_ms DESC"
+    )
+    abstract fun listImports(): List<StatementImportSummary>
+
+    @Query("SELECT COUNT(*) FROM statement_import")
+    abstract fun countImports(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM statement_import_row INNER JOIN statement_import " +
+            "ON statement_import.id = statement_import_row.import_id " +
+            "WHERE statement_import.status IN ('IMPORTED_UNVERIFIED', 'PERIOD_VALIDATED', 'RECONCILED')"
+    )
+    abstract fun countRows(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM statement_import WHERE authority = 'FORMAT_RECOGNIZED_UNVERIFIED' " +
+            "AND status = 'IMPORTED_UNVERIFIED'"
+    )
+    abstract fun countAwaitingValidation(): Long
+
+    @Query("SELECT COUNT(*) FROM statement_import WHERE status IN ('IMPORTING', 'IMPORT_FAILED')")
+    abstract fun countIncompleteImports(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM statement_import WHERE " +
+            "status IN ('IMPORTED_UNVERIFIED', 'PERIOD_VALIDATED', 'RECONCILED') AND (" +
+            "(SELECT COUNT(*) FROM statement_artifact_chunk WHERE import_id = statement_import.id) " +
+            "!= statement_import.artifact_chunk_count OR " +
+            "(SELECT COUNT(*) FROM statement_import_row WHERE import_id = statement_import.id) " +
+            "!= statement_import.valid_row_count)"
+    )
+    abstract fun countCompletedIntegrityFailures(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM statement_import_row LEFT JOIN statement_import " +
+            "ON statement_import.id = statement_import_row.import_id LEFT JOIN statement_row " +
+            "ON statement_row.id = statement_import_row.row_id " +
+            "WHERE statement_import.id IS NULL OR statement_row.id IS NULL"
+    )
+    abstract fun countOrphanLinks(): Long
+
+    @Transaction
+    open fun prepareImport(importEntity: StatementImportEntity): StatementPrepareResult {
+        val importId = insertImportIgnore(importEntity)
+        if (importId == -1L) {
+            val existing = findImportByFileHashAndParser(
+                importEntity.fileHash,
+                importEntity.parserVersion,
+            )
+                ?: error("账单文件摘要冲突后无法读取")
+            check(existing.artifactSizeBytes == importEntity.artifactSizeBytes)
+            check(existing.artifactChunkCount == importEntity.artifactChunkCount)
+            check(existing.sourceKind == importEntity.sourceKind)
+            check(existing.format == importEntity.format)
+            check(existing.observedRowFromMs == importEntity.observedRowFromMs)
+            check(existing.observedRowToMs == importEntity.observedRowToMs)
+            check(existing.rawRowCount == importEntity.rawRowCount)
+            check(existing.validRowCount == importEntity.validRowCount)
+            check(existing.invalidRowCount == importEntity.invalidRowCount)
+            check(existing.ignoredFooterRowCount == importEntity.ignoredFooterRowCount)
+            val completed = existing.status in setOf(
+                StatementImportStatus.IMPORTED_UNVERIFIED,
+                StatementImportStatus.PERIOD_VALIDATED,
+                StatementImportStatus.RECONCILED,
+            )
+            if (!completed) markResuming(existing.id)
+            return StatementPrepareResult(existing.id, completed)
+        }
+        return StatementPrepareResult(importId, false)
+    }
+
+    @Transaction
+    open fun appendArtifactChunk(entity: StatementArtifactChunkEntity) {
+        if (insertArtifactChunkIgnore(entity) == -1L) {
+            check(findChunkHash(entity.importId, entity.chunkIndex) == entity.chunkHash) {
+                "账单原文件分块摘要冲突"
+            }
+        }
+    }
+
+    @Transaction
+    open fun appendRowBatch(
+        importId: Long,
+        rows: List<Pair<Int, StatementRowEntity>>,
+    ): StatementRowBatchResult {
+        var insertedRows = 0
+        var existingRows = 0
+        rows.forEach { (sourceRowNumber, proposed) ->
+            val existingFingerprint = findLinkedRowFingerprint(importId, sourceRowNumber)
+            if (existingFingerprint != null) {
+                check(existingFingerprint == proposed.rowFingerprint) { "账单恢复行内容冲突" }
+                existingRows++
+                return@forEach
+            }
+            val rowId = insertRow(proposed)
+            insertedRows++
+            insertImportRow(
+                StatementImportRowEntity(
+                    importId = importId,
+                    rowId = rowId,
+                    sourceRowNumber = sourceRowNumber,
+                )
+            )
+        }
+        return StatementRowBatchResult(insertedRows, existingRows)
+    }
+
+    @Transaction
+    open fun finalizeImport(importId: Long, expectedChunks: Int, expectedRows: Int) {
+        val imported = findImportById(importId) ?: error("账单批次不存在")
+        check(imported.artifactChunkCount == expectedChunks) { "账单原文件分块声明不一致" }
+        check(imported.validRowCount == expectedRows) { "账单证据行声明不一致" }
+        check(countArtifactChunks(importId) == expectedChunks.toLong()) { "账单原文件分块不完整" }
+        check(countLinkedRows(importId) == expectedRows.toLong()) { "账单证据行不完整" }
+        check(markCompleted(importId) == 1) { "账单批次无法完成" }
+    }
 }
 
 @Dao

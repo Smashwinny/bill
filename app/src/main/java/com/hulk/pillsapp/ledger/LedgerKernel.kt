@@ -36,6 +36,16 @@ data class KernelStatus(
     val nonAuthoritativeBaselineCount: Long = 0,
     val nonAuthoritativeReconcilableCount: Long = 0,
     val kernelAsyncFailureCount: Long = 0,
+    val coverageSourceCount: Long = 0,
+    val sourcesWithoutStatementCount: Long = 0,
+    val statementImportCount: Long = 0,
+    val statementRowCount: Long = 0,
+    val statementAwaitingValidationCount: Long = 0,
+    val statementIncompleteImportCount: Long = 0,
+    val statementIntegrityFailureCount: Long = 0,
+    val orphanStatementLinkCount: Long = 0,
+    val sourceCoverage: List<SourceCoverageItem> = emptyList(),
+    val statementImports: List<StatementImportSummary> = emptyList(),
     val debtAccounts: List<DebtAccountEntity> = emptyList(),
     val lastSweepAtMs: Long? = null,
     val t03Migrated: Boolean = false,
@@ -56,6 +66,7 @@ object LedgerKernel {
     private const val PREF_T03_MIGRATED = "t03_migrated"
     private const val PREF_LAST_SWEEP_AT = "last_sweep_at_ms"
     private const val PREF_LAST_HEALTH_CHECK_AT = "last_health_check_at_ms"
+    private const val STATEMENT_IMPORT_ROW_BATCH_SIZE = 25
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "ledger-ingest")
@@ -84,7 +95,7 @@ object LedgerKernel {
         // 因此每个 factory 必须持有独立拷贝。
         database = Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, DB_NAME)
             .openHelperFactory(net.sqlcipher.database.SupportFactory(passphrase.copyOf()))
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
             .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
             .build()
         executor.submit { executorThread = Thread.currentThread() }.get(2, TimeUnit.SECONDS)
@@ -105,10 +116,14 @@ object LedgerKernel {
         "raw_observation",
         "canonical_transaction",
         "debt_account",
+        "statement_import",
+        "statement_artifact_chunk",
+        "statement_row",
         "observation_revision",
         "evidence_link",
         "debt_account_evidence",
         "account_discovery_scan",
+        "statement_import_row",
         "ledger_entry",
         "reconciliation_run",
         "coverage_gap",
@@ -136,7 +151,7 @@ object LedgerKernel {
         )
         val encryptedDb = Room.databaseBuilder(context.applicationContext, LedgerDatabase::class.java, encName)
             .openHelperFactory(net.sqlcipher.database.SupportFactory(passphrase.copyOf()))
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
             .build()
         try {
             val writable = encryptedDb.openHelper.writableDatabase
@@ -217,13 +232,7 @@ object LedgerKernel {
                 block()
             } catch (failure: Throwable) {
                 // 不记录异常消息（可能含敏感内容），但留下类型与时间，避免完整性故障静默。
-                appContext?.let { context ->
-                    runCatching {
-                        java.io.File(context.filesDir, "kernel_async_failure.txt").writeText(
-                            "type=${failure.javaClass.name}\nat_ms=${System.currentTimeMillis()}\n"
-                        )
-                    }
-                }
+                recordAsyncFailure(failure)
             }
         }
     }
@@ -401,6 +410,111 @@ object LedgerKernel {
         }
     }
 
+    /** M4.0 只存入待校验账单证据，不创建正式交易或负债余额。 */
+    fun commitStatementPreview(
+        preview: StatementPreview,
+        callback: (Result<StatementCommitResult>) -> Unit,
+    ) {
+        executor.submit {
+            val prepared = runCatching {
+                check(preview.canImport) { "账单预览未通过完整解析" }
+                val now = System.currentTimeMillis()
+                now to requireDb().statementDao().prepareImport(preview.toImportEntity(now))
+            }
+            prepared.fold(
+                onSuccess = { (now, state) ->
+                    if (state.duplicateCompleted) {
+                        callback(
+                            Result.success(
+                                StatementCommitResult(state.importId, true, 0, preview.rows.size)
+                            )
+                        )
+                    } else {
+                        continueStatementImport(
+                            preview = preview,
+                            importId = state.importId,
+                            createdAtMs = now,
+                            chunkIndex = 0,
+                            rowIndex = 0,
+                            callback = callback,
+                        )
+                    }
+                },
+                onFailure = { failure ->
+                    recordAsyncFailure(failure)
+                    callback(Result.failure(failure))
+                },
+            )
+        }
+    }
+
+    /**
+     * 每次只提交一个 256 KiB 原文件块或至多 25 行，然后重新排到队尾。
+     * 通知/SMS 的同步写入因此能插入批次之间，不会被十万行大事务饿死。
+     */
+    private fun continueStatementImport(
+        preview: StatementPreview,
+        importId: Long,
+        createdAtMs: Long,
+        chunkIndex: Int,
+        rowIndex: Int,
+        callback: (Result<StatementCommitResult>) -> Unit,
+    ) {
+        executor.submit {
+            val dao = requireDb().statementDao()
+            val result = runCatching {
+                val totalChunks = (preview.sourceArtifact.size + STATEMENT_ARTIFACT_CHUNK_BYTES - 1) /
+                    STATEMENT_ARTIFACT_CHUNK_BYTES
+                when {
+                    chunkIndex < totalChunks -> {
+                        val start = chunkIndex * STATEMENT_ARTIFACT_CHUNK_BYTES
+                        val end = minOf(start + STATEMENT_ARTIFACT_CHUNK_BYTES, preview.sourceArtifact.size)
+                        val bytes = preview.sourceArtifact.copyOfRange(start, end)
+                        dao.appendArtifactChunk(
+                            StatementArtifactChunkEntity(
+                                importId = importId,
+                                chunkIndex = chunkIndex,
+                                chunkHash = java.security.MessageDigest.getInstance("SHA-256")
+                                    .digest(bytes).joinToString("") { byte -> "%02x".format(byte) },
+                                bytes = bytes,
+                            )
+                        )
+                        continueStatementImport(
+                            preview, importId, createdAtMs, chunkIndex + 1, rowIndex,
+                            callback,
+                        )
+                    }
+                    rowIndex < preview.rows.size -> {
+                        val end = minOf(rowIndex + STATEMENT_IMPORT_ROW_BATCH_SIZE, preview.rows.size)
+                        dao.appendRowBatch(
+                            importId,
+                            preview.toRowEntities(createdAtMs, rowIndex, end),
+                        )
+                        continueStatementImport(
+                            preview, importId, createdAtMs, chunkIndex, end,
+                            callback,
+                        )
+                    }
+                    else -> {
+                        dao.finalizeImport(importId, totalChunks, preview.rows.size)
+                        refreshStatusBlocking()
+                        callback(
+                            Result.success(
+                                StatementCommitResult(importId, false, preview.rows.size, 0)
+                            )
+                        )
+                    }
+                }
+            }
+            result.exceptionOrNull()?.let { failure ->
+                runCatching { dao.markFailed(importId) }
+                recordAsyncFailure(failure)
+                refreshStatusBlocking()
+                callback(Result.failure(failure))
+            }
+        }
+    }
+
     fun markHealthCheck() {
         appContext?.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             ?.edit()?.putLong(PREF_LAST_HEALTH_CHECK_AT, System.currentTimeMillis())?.apply()
@@ -414,6 +528,11 @@ object LedgerKernel {
         val context = appContext ?: return
         val prefs = context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         val db = requireDb()
+        val statementImports = db.statementDao().listImports()
+        val sourceCoverage = SourceCoverageAudit.build(
+            db.observationDao().sourceCoverageSummaries(),
+            statementImports,
+        )
         val snapshot = KernelStatus(
             observationCount = db.observationDao().countAll(),
             candidateCount = db.canonicalDao().countAll(),
@@ -447,6 +566,19 @@ object LedgerKernel {
             } else {
                 0L
             },
+            coverageSourceCount = sourceCoverage.count { it.isObservationSource }.toLong(),
+            sourcesWithoutStatementCount = sourceCoverage.count {
+                it.isObservationSource &&
+                    (it.statementObservedRowFromMs == null || it.statementObservedRowToMs == null)
+            }.toLong(),
+            statementImportCount = db.statementDao().countImports(),
+            statementRowCount = db.statementDao().countRows(),
+            statementAwaitingValidationCount = db.statementDao().countAwaitingValidation(),
+            statementIncompleteImportCount = db.statementDao().countIncompleteImports(),
+            statementIntegrityFailureCount = db.statementDao().countCompletedIntegrityFailures(),
+            orphanStatementLinkCount = db.statementDao().countOrphanLinks(),
+            sourceCoverage = sourceCoverage,
+            statementImports = statementImports,
             debtAccounts = db.debtAccountDao().listVisible(),
             lastSweepAtMs = prefs.getLong(PREF_LAST_SWEEP_AT, 0L).takeIf { it > 0L },
             t03Migrated = prefs.getBoolean(PREF_T03_MIGRATED, false),
@@ -456,8 +588,9 @@ object LedgerKernel {
         try {
             java.io.File(context.filesDir, "kernel_status_snapshot.txt").writeText(
                 buildString {
-                    appendLine("schema_version=3")
+                    appendLine("schema_version=4")
                     appendLine("debt_parser_version=$DEBT_DISCOVERY_PARSER_VERSION")
+                    appendLine("statement_parser_version=$STATEMENT_PARSER_VERSION")
                     appendLine("observations=${snapshot.observationCount}")
                     appendLine("eligible_revisions=${snapshot.eligibleRevisionCount}")
                     appendLine("candidates=${snapshot.candidateCount}")
@@ -480,12 +613,30 @@ object LedgerKernel {
                     appendLine("non_authoritative_baselines=${snapshot.nonAuthoritativeBaselineCount}")
                     appendLine("non_authoritative_reconcilable=${snapshot.nonAuthoritativeReconcilableCount}")
                     appendLine("kernel_async_failures=${snapshot.kernelAsyncFailureCount}")
+                    appendLine("coverage_sources=${snapshot.coverageSourceCount}")
+                    appendLine("sources_without_statement=${snapshot.sourcesWithoutStatementCount}")
+                    appendLine("statement_imports=${snapshot.statementImportCount}")
+                    appendLine("statement_rows=${snapshot.statementRowCount}")
+                    appendLine("statement_awaiting_validation=${snapshot.statementAwaitingValidationCount}")
+                    appendLine("statement_incomplete_imports=${snapshot.statementIncompleteImportCount}")
+                    appendLine("statement_integrity_failures=${snapshot.statementIntegrityFailureCount}")
+                    appendLine("orphan_statement_links=${snapshot.orphanStatementLinkCount}")
                     appendLine("t03_migrated=${snapshot.t03Migrated}")
                     appendLine("snapshot_at_ms=${System.currentTimeMillis()}")
                 }
             )
         } catch (_: Throwable) {
             // 快照写盘失败不影响主流程
+        }
+    }
+
+    private fun recordAsyncFailure(failure: Throwable) {
+        appContext?.let { context ->
+            runCatching {
+                java.io.File(context.filesDir, "kernel_async_failure.txt").writeText(
+                    "type=${failure.javaClass.name}\nat_ms=${System.currentTimeMillis()}\n"
+                )
+            }
         }
     }
 

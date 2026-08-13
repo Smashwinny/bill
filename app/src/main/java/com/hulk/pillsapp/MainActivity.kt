@@ -53,6 +53,12 @@ import com.hulk.pillsapp.ledger.SmsBackfill
 import com.hulk.pillsapp.ledger.DebtAccountStatus
 import com.hulk.pillsapp.ledger.DebtEventKind
 import com.hulk.pillsapp.ledger.DebtEvidenceStrength
+import com.hulk.pillsapp.ledger.StatementAuthority
+import com.hulk.pillsapp.ledger.StatementImportRepository
+import com.hulk.pillsapp.ledger.StatementImportStatus
+import com.hulk.pillsapp.ledger.StatementImportUiState
+import com.hulk.pillsapp.ledger.StatementPreviewIssue
+import com.hulk.pillsapp.ledger.StatementSourceKind
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -116,6 +122,12 @@ class MainActivity : ComponentActivity() {
         refreshState(this)
     }
 
+    private val statementFileLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { StatementImportRepository.preview(this, it) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         refreshState(this)
@@ -139,6 +151,18 @@ class MainActivity : ComponentActivity() {
                         },
                         onOpenAutostartSettings = { openAutostartSettings() },
                         onRequestBatteryUnrestricted = { requestBatteryUnrestricted() },
+                        onSelectStatementFile = {
+                            statementFileLauncher.launch(
+                                arrayOf(
+                                    "text/csv",
+                                    "text/tab-separated-values",
+                                    "text/plain",
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    "application/zip",
+                                    "application/octet-stream",
+                                )
+                            )
+                        },
                         onRefresh = {
                             refreshState(this@MainActivity)
                         }
@@ -200,6 +224,7 @@ private fun AppHome(
     onRequestSmsPermissions: () -> Unit,
     onOpenAutostartSettings: () -> Unit,
     onRequestBatteryUnrestricted: () -> Unit,
+    onSelectStatementFile: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -239,6 +264,7 @@ private fun AppHome(
             onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
         )
         DebtDiscoverySection()
+        SourceCoverageAndImportSection(onSelectStatementFile)
 
         Spacer(modifier = Modifier.height(20.dp))
         ProbeConfigurationSection(
@@ -377,6 +403,158 @@ private fun AppHome(
                     }
                 },
             )
+        }
+    }
+}
+
+private val statementSourceLabels = mapOf(
+    StatementSourceKind.ALIPAY to "疑似支付宝格式",
+    StatementSourceKind.WECHAT to "疑似微信格式",
+    StatementSourceKind.BANK to "疑似银行/银联格式",
+    StatementSourceKind.UNKNOWN to "未识别来源",
+)
+
+private val statementAuthorityLabels = mapOf(
+    StatementAuthority.FORMAT_RECOGNIZED_UNVERIFIED to "格式已识别，来源/完整性待校验",
+    StatementAuthority.PERIOD_VALIDATED to "账期已校验",
+    StatementAuthority.AUTHORITATIVE to "权威来源",
+)
+
+private val statementImportStatusLabels = mapOf(
+    StatementImportStatus.IMPORTING to "未完成/写入中（重新选择同一文件可续传）",
+    StatementImportStatus.IMPORT_FAILED to "写入中断，重新选择同一文件可续传",
+    StatementImportStatus.IMPORTED_UNVERIFIED to "证据完整，来源待校验",
+    StatementImportStatus.PERIOD_VALIDATED to "账期已校验",
+    StatementImportStatus.RECONCILED to "已对账",
+)
+
+private val statementIssueLabels = mapOf(
+    StatementPreviewIssue.EMPTY_FILE to "文件为空",
+    StatementPreviewIssue.FILE_TOO_LARGE to "文件超过 25 MiB 安全上限",
+    StatementPreviewIssue.ENCRYPTED_OR_UNREADABLE_ARCHIVE to "压缩包已加密或无法读取，请先用官方密码解压后选择 CSV/XLSX",
+    StatementPreviewIssue.AMBIGUOUS_CONTAINER to "文件含多个账单表或多个候选文件；为避免漏读，请分别导出或拆分后逐个选择",
+    StatementPreviewIssue.UNSUPPORTED_FORMAT to "尚不支持该文件，请选择 CSV、TSV、XLSX 或包含它们的未加密 ZIP",
+    StatementPreviewIssue.UNRECOGNIZED_STATEMENT_SOURCE to "表格有时间和金额列，但无法确认是支付宝、微信或银行账单，已拒绝冒充官方来源",
+    StatementPreviewIssue.HEADER_NOT_FOUND to "未找到交易时间和金额列",
+    StatementPreviewIssue.NO_VALID_ROWS to "没有可安全导入的账单行",
+    StatementPreviewIssue.INVALID_ROWS_PRESENT to "存在无法解析的数据行，本次禁止部分导入",
+    StatementPreviewIssue.MALFORMED_TABLE to "表格引号或行列结构损坏，已拒绝部分解析",
+    StatementPreviewIssue.CELL_TOO_LARGE to "表格单元格超过 4096 字符安全上限",
+    StatementPreviewIssue.UNSUPPORTED_CURRENCY to "存在未明确标注为人民币的金额；当前版本为避免币种错记而拒绝导入",
+    StatementPreviewIssue.TOO_MANY_ROWS to "账单超过 100000 行安全上限",
+    StatementPreviewIssue.IMPORT_FAILED to "账单入库失败，已保留原数据不变",
+)
+
+@Composable
+private fun SourceCoverageAndImportSection(onSelectStatementFile: () -> Unit) {
+    val status by LedgerKernel.status.collectAsState()
+    val importState by StatementImportRepository.state.collectAsState()
+    var showAllImports by remember { mutableStateOf(false) }
+    Spacer(modifier = Modifier.height(20.dp))
+    Text(text = stringResource(R.string.m4_section_title))
+    Text(
+        text = stringResource(
+            R.string.m4_coverage_counts,
+            status.coverageSourceCount,
+            status.sourcesWithoutStatementCount,
+            status.statementImportCount,
+            status.statementRowCount,
+            status.statementIncompleteImportCount,
+            status.statementIntegrityFailureCount,
+        )
+    )
+    Text(text = stringResource(R.string.m4_authority_warning))
+    status.sourceCoverage.forEach { item ->
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            colors = CardDefaults.cardColors(),
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(text = item.label)
+                Text(text = "${item.channel} · ${item.observationCount} 条观察")
+                if (item.firstSeenAtMs != null && item.lastSeenAtMs != null) {
+                    Text(text = "观察区间：${formatEventTime(item.firstSeenAtMs)} 至 ${formatEventTime(item.lastSeenAtMs)}")
+                }
+                if (item.statementObservedRowFromMs != null && item.statementObservedRowToMs != null) {
+                    Text(text = "文件内交易行时间：${formatEventTime(item.statementObservedRowFromMs)} 至 ${formatEventTime(item.statementObservedRowToMs)}")
+                }
+                item.authority?.let { Text(text = statementAuthorityLabels[it] ?: it.name) }
+                Text(text = "覆盖结论：${item.gapLabel}")
+            }
+        }
+    }
+    if (status.sourceCoverage.isEmpty()) {
+        Text(text = stringResource(R.string.m4_no_sources))
+    }
+
+    Spacer(modifier = Modifier.height(12.dp))
+    Button(
+        onClick = onSelectStatementFile,
+        enabled = importState !is StatementImportUiState.Importing,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(text = stringResource(R.string.m4_select_statement))
+    }
+    when (val state = importState) {
+        StatementImportUiState.Idle -> Text(text = stringResource(R.string.m4_supported_formats))
+        StatementImportUiState.Reading -> Text(text = stringResource(R.string.m4_reading))
+        StatementImportUiState.Importing -> Text(text = stringResource(R.string.m4_importing))
+        is StatementImportUiState.Failed -> {
+            Text(text = "无法导入：${statementIssueLabels[state.issue] ?: state.issue.name}")
+            Button(
+                onClick = { StatementImportRepository.reset() },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(text = stringResource(R.string.m4_close_result)) }
+        }
+        is StatementImportUiState.PreviewReady -> {
+            val preview = state.preview
+            Text(text = "文件：${preview.displayName}")
+            Text(text = "识别：${statementSourceLabels[preview.sourceKind]} · ${preview.format.name}")
+            Text(text = "行数：表头后非空 ${preview.rawRowCount} · 有效 ${preview.validRowCount} · 标准尾注 ${preview.ignoredFooterRowCount} · 失败 ${preview.invalidRowCount}")
+            if (preview.observedRowFromMs != null && preview.observedRowToMs != null) {
+                Text(text = "交易行时间范围（不是完整账期）：${formatEventTime(preview.observedRowFromMs)} 至 ${formatEventTime(preview.observedRowToMs)}")
+            }
+            preview.issues.forEach { issue -> Text(text = "检查：${statementIssueLabels[issue] ?: issue.name}") }
+            Text(text = stringResource(R.string.m4_preview_privacy))
+            Button(
+                onClick = { StatementImportRepository.confirmImport() },
+                enabled = preview.canImport,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(text = stringResource(R.string.m4_confirm_import)) }
+        }
+        is StatementImportUiState.Imported -> {
+            Text(
+                text = if (state.result.duplicateFile) {
+                    stringResource(R.string.m4_duplicate_file)
+                } else {
+                    stringResource(
+                        R.string.m4_import_success,
+                        state.result.insertedRows,
+                    )
+                }
+            )
+            Button(
+                onClick = { StatementImportRepository.reset() },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(text = stringResource(R.string.m4_close_result)) }
+        }
+    }
+
+    if (status.statementImports.isNotEmpty()) {
+        Text(text = stringResource(R.string.m4_import_history))
+        val visibleImports = if (showAllImports) status.statementImports else status.statementImports.take(20)
+        visibleImports.forEach { imported ->
+            Text(
+                text = "${imported.displayName} · ${statementSourceLabels[imported.sourceKind]} · " +
+                    "${imported.linkedRowCount} 行 · ${statementImportStatusLabels[imported.status]} · " +
+                    "${statementAuthorityLabels[imported.authority]}"
+            )
+        }
+        if (!showAllImports && status.statementImports.size > visibleImports.size) {
+            Button(
+                onClick = { showAllImports = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(text = "展开其余 ${status.statementImports.size - visibleImports.size} 个解析批次") }
         }
     }
 }

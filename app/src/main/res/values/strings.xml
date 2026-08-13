@@ -74,4 +74,18 @@
     <string name="m3_rescan">重新扫描负债线索</string>
     <string name="m3_no_candidates">暂未发现负债账户线索</string>
     <string name="m3_more_candidates">展开其余 %1$d 个候选</string>
+    <string name="m4_section_title">来源覆盖审计与待校验账单文件导入（M4.0）</string>
+    <string name="m4_coverage_counts">观察到的金融来源 %1$d 个 · 未完成账户账单覆盖 %2$d · 解析批次 %3$d · 已完整证据行 %4$d · 写入中断/进行中 %5$d · 完整性异常 %6$d</string>
+    <string name="m4_authority_warning">通知/短信只证明看到过线索；系统文件选择器也不能证明文件一定来自官方。首次导入只作为待校验证据，不自动补正式账。</string>
+    <string name="m4_no_sources">尚未从已捕获证据中识别出金融来源</string>
+    <string name="m4_select_statement">选择待校验账单文件</string>
+    <string name="m4_supported_formats">支持 CSV、TSV、XLSX 以及包含它们的未加密 ZIP；加密邮件压缩包请先在本机解压。PDF 证明文件不适合逐笔导入。</string>
+    <string name="m4_reading">正在只读解析文件，尚未写入账本…</string>
+    <string name="m4_importing">正在写入加密账单证据库…</string>
+    <string name="m4_preview_privacy">预览只显示疑似格式、行数和文件内交易行时间范围，不在界面、ADB 或调试报告中展示交易原文。</string>
+    <string name="m4_confirm_import">确认导入为“疑似格式已识别、来源待校验”</string>
+    <string name="m4_duplicate_file">相同文件已导入，本次没有重复写入。</string>
+    <string name="m4_import_success">导入成功：逐行保留 %1$d 个源行证据。未跨文件自动合并，尚未进入正式账。</string>
+    <string name="m4_close_result">关闭本次结果</string>
+    <string name="m4_import_history">不可变解析批次审计历史</string>
 </resources>
