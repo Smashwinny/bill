@@ -21,8 +21,8 @@ android {
         applicationId = "com.hulk.pillsapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 14
-        versionName = "1.6.0-m5-sensitive-mode"
+        versionCode = 16
+        versionName = "1.6.2-m5-ui-unblock"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(

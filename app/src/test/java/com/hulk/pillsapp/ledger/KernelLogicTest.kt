@@ -47,6 +47,41 @@ class KernelLogicTest {
         assertFalse(ObservationRecoveryRules.isComplete(true, 1L))
     }
 
+    @Test
+    fun durableCallbackNeverWaitsForDatabaseOnSystemMainThread() {
+        assertFalse(CallbackPersistencePolicy.shouldWaitForDatabase(stagedDurably = true))
+        assertTrue(CallbackPersistencePolicy.shouldWaitForDatabase(stagedDurably = false))
+    }
+
+    @Test
+    fun rejectedRetryScheduleNeverThrowsOrLocksTheFlag() {
+        val scheduled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val failures = mutableListOf<Throwable>()
+        val rejected = RetryScheduleGuard.scheduleNoThrow(
+            scheduled = scheduled,
+            schedule = { throw java.util.concurrent.RejectedExecutionException("injected") },
+            retry = { error("must not run") },
+            onFailure = failures::add,
+        )
+        assertFalse(rejected)
+        assertFalse(scheduled.get())
+        assertEquals(1, failures.size)
+
+        var runnable: Runnable? = null
+        var retried = false
+        val accepted = RetryScheduleGuard.scheduleNoThrow(
+            scheduled = scheduled,
+            schedule = { runnable = it },
+            retry = { retried = true },
+            onFailure = failures::add,
+        )
+        assertTrue(accepted)
+        assertTrue(scheduled.get())
+        requireNotNull(runnable).run()
+        assertTrue(retried)
+        assertFalse(scheduled.get())
+    }
+
     // ---------------------------------------------------------------
     // V1 §5.4 / V1.1 §4：同 key 投递决策
     // ---------------------------------------------------------------

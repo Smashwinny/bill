@@ -43,14 +43,21 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        if (!SensitiveAppMode.confirmServiceConnected(this, restoreAttemptAtCreate)) {
+        val confirmation = SensitiveAppMode.confirmServiceConnected(this, restoreAttemptAtCreate) {
+            BehaviorAccessibilityState.registerCallbackOwner(this, this)
+            if (!LedgerKernel.markA11yConnectedDurably()) {
+                BehaviorAccessibilityState.clearCallbackConnected(this, this)
+                false
+            } else {
+                connectionAccepted = true
+                true
+            }
+        }
+        if (!confirmation.allowsCollection()) {
             connectionAccepted = false
             return
         }
         restoreAttemptAtCreate = null
-        connectionAccepted = true
-        BehaviorAccessibilityState.registerCallbackOwner(this, this)
-        LedgerKernel.markA11yConnected()
         heartbeatHandler.removeCallbacks(heartbeat)
         heartbeatHandler.post(heartbeat)
     }

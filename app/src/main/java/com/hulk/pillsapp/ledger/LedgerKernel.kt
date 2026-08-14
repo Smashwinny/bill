@@ -83,6 +83,35 @@ internal object ObservationRecoveryRules {
         !hasPendingOutbox && pendingParseCount == 0L
 }
 
+internal object CallbackPersistencePolicy {
+    /** fsync outbox 已经是回调返回后的耐久承诺；只有 outbox 失败才同步等数据库兜底。 */
+    fun shouldWaitForDatabase(stagedDurably: Boolean): Boolean = !stagedDurably
+}
+
+internal object RetryScheduleGuard {
+    fun scheduleNoThrow(
+        scheduled: java.util.concurrent.atomic.AtomicBoolean,
+        schedule: (Runnable) -> Unit,
+        retry: () -> Unit,
+        onFailure: (Throwable) -> Unit,
+    ): Boolean {
+        if (!scheduled.compareAndSet(false, true)) return true
+        return try {
+            schedule(
+                Runnable {
+                    scheduled.set(false)
+                    retry()
+                }
+            )
+            true
+        } catch (failure: Throwable) {
+            scheduled.set(false)
+            runCatching { onFailure(failure) }
+            false
+        }
+    }
+}
+
 /**
  * V1.1 §4 写入管线的实现。
  *
@@ -377,7 +406,7 @@ object LedgerKernel {
                 )
             }
             .getOrNull()
-        val future = callbackExecutor.submit {
+        val task = java.util.concurrent.Callable {
             try {
                 if (staged != null) {
                     processStagedObservation(staged, durableEntity)
@@ -401,15 +430,43 @@ object LedgerKernel {
                     )
                 }
             }
+            Unit
+        }
+        val future = try {
+            callbackExecutor.submit(task)
+        } catch (failure: Throwable) {
+            recordAsyncFailure(failure)
+            if (staged != null) {
+                runCatching {
+                    openGapAsync(
+                        GapDetectors.CALLBACK_OUTBOX,
+                        "通知/SMS 加密待办已落盘但后台提交器不可用，等待下次启动重放",
+                    )
+                }.onFailure(::recordAsyncFailure)
+                scheduleObservationOutboxRetry()
+            } else {
+                runCatching {
+                    openGapAsync(
+                        GapDetectors.CALLBACK_PERSISTENCE,
+                        "通知/SMS 待办与数据库提交器均不可用，需权威对账",
+                    )
+                }.onFailure(::recordAsyncFailure)
+            }
+            return
+        }
+        if (!CallbackPersistencePolicy.shouldWaitForDatabase(stagedDurably = staged != null)) {
+            // 文件已经加密、fsync、原子 rename 并同步目录；此处立即归还系统主回调，
+            // 避免通知风暴连续占用主线程而让 Activity 永远停在启动白屏。
+            return
         }
         try {
             future.get(3, TimeUnit.SECONDS)
         } catch (_: java.util.concurrent.TimeoutException) {
-            // 文件已 fsync，任务继续运行；系统回调可以安全返回，不崩溃也不丢观察。
+            // 仅 outbox 落盘失败的兜底路径会等待；此时已打开 CALLBACK_PERSISTENCE gap，
+            // 数据库任务继续运行，但必须依赖权威对账，不能宣称本次观察已经耐久保存。
         } catch (failure: Throwable) {
             // Callable 自身也捕获失败；这里仅防提交器级异常，绝不向系统回调逸出。
             recordAsyncFailure(failure)
-            if (staged != null) scheduleObservationOutboxRetry()
         }
     }
 
@@ -522,14 +579,17 @@ object LedgerKernel {
     }
 
     private fun scheduleObservationOutboxRetry() {
-        if (!observationRetryScheduled.compareAndSet(false, true)) return
-        callbackExecutor.schedule(
-            {
-                observationRetryScheduled.set(false)
-                drainObservationOutbox()
+        RetryScheduleGuard.scheduleNoThrow(
+            scheduled = observationRetryScheduled,
+            schedule = { runnable ->
+                callbackExecutor.schedule(
+                    runnable,
+                    30L,
+                    TimeUnit.SECONDS,
+                )
             },
-            30L,
-            TimeUnit.SECONDS,
+            retry = ::drainObservationOutbox,
+            onFailure = ::recordAsyncFailure,
         )
     }
 
@@ -776,15 +836,38 @@ object LedgerKernel {
 
     fun markA11yConnected() {
         markA11yHeartbeat()
-        behaviorExecutor.submit {
-            runCatching {
-                requireDb().coverageGapDao().closeOpenByDetector(
-                    GapDetectors.A11Y_SERVICE,
-                    System.currentTimeMillis(),
-                )
-                refreshStatusBlocking()
-            }.onFailure(::recordAsyncFailure)
-        }
+        scheduleA11yGapClose()
+    }
+
+    /**
+     * 敏感模式恢复的提交屏障：心跳必须先同步落盘，调用方随后才可清除恢复会话。
+     * 不用 apply，避免进程在两个 SharedPreferences 写入之间死亡后留下“会话已清、心跳丢失”。
+     */
+    fun markA11yConnectedDurably(): Boolean {
+        val context = appContext ?: return false
+        val persisted = runCatching {
+            context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putLong(PREF_LAST_A11Y_HEARTBEAT_AT, System.currentTimeMillis())
+                .commit()
+        }.getOrDefault(false)
+        if (!persisted) return false
+        scheduleA11yGapClose()
+        return true
+    }
+
+    private fun scheduleA11yGapClose() {
+        runCatching {
+            behaviorExecutor.submit {
+                runCatching {
+                    requireDb().coverageGapDao().closeOpenByDetector(
+                        GapDetectors.A11Y_SERVICE,
+                        System.currentTimeMillis(),
+                    )
+                    refreshStatusBlocking()
+                }.onFailure(::recordAsyncFailure)
+            }
+        }.onFailure(::recordAsyncFailure)
     }
 
     fun markA11yHeartbeat() {

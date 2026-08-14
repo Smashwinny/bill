@@ -38,6 +38,24 @@ class AccessibilityServiceListEditorTest {
     }
 
     @Test
+    fun shorthandAndFullyQualifiedComponentsHaveTheSameIdentity() {
+        val shorthand = "com.miui.screenshot/.accessibility.ScreenshotAccessibilityService"
+        val full = "com.miui.screenshot/com.miui.screenshot.accessibility.ScreenshotAccessibilityService"
+        val raw = "$pick:$shorthand:$ours"
+
+        assertTrue(AccessibilityServiceListEditor.contains(raw, full))
+        assertEquals("$pick:$shorthand:$ours", AccessibilityServiceListEditor.add(raw, full))
+        assertEquals(
+            listOf(
+                pick,
+                "com.miui.screenshot/com.miui.screenshot.accessibility.ScreenshotAccessibilityService",
+            ),
+            AccessibilityServiceListEditor.without(raw, ours),
+        )
+        assertEquals("$pick:$shorthand", AccessibilityServiceListEditor.remove(raw, ours))
+    }
+
+    @Test
     fun bankLaunchRequiresPausedPhaseAndOwnServiceAbsent() {
         SensitiveLaunchPhase.entries.forEach { phase ->
             assertEquals(
@@ -77,5 +95,12 @@ class AccessibilityServiceListEditorTest {
                 ownServiceEnabled = false,
             )
         )
+    }
+
+    @Test
+    fun connectedServiceKeepsCollectingWhenOnlySessionCleanupIsPending() {
+        assertFalse(SensitiveConnectionConfirmation.REJECTED.allowsCollection())
+        assertTrue(SensitiveConnectionConfirmation.CONNECTED.allowsCollection())
+        assertTrue(SensitiveConnectionConfirmation.CONNECTED_SESSION_PENDING.allowsCollection())
     }
 }

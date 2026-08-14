@@ -40,6 +40,16 @@ enum class SensitivePauseResult {
 
 internal enum class SensitiveLaunchPhase { PREPARING, PAUSED, LAUNCHED, RECOVERING }
 
+/** 连接是否可采集，与恢复会话是否已清理分开表达，防止清理失败时静默停采。 */
+internal enum class SensitiveConnectionConfirmation {
+    REJECTED,
+    CONNECTED,
+    CONNECTED_SESSION_PENDING,
+    ;
+
+    fun allowsCollection(): Boolean = this != REJECTED
+}
+
 internal object SensitivePhaseRules {
     fun mayLaunchBank(phase: SensitiveLaunchPhase, ownServiceAbsent: Boolean): Boolean =
         phase == SensitiveLaunchPhase.PAUSED && ownServiceAbsent
@@ -312,31 +322,52 @@ object SensitiveAppMode {
      * 只有本次 remove/add 产生的 Service 连接回调，且系统列表仍确认组件已启用，
      * 才结束恢复会话。旧实例、旧恢复尝试和 add 失败后的迟到回调都必须拒绝。
      */
-    fun confirmServiceConnected(context: Context, observedAttemptId: String?): Boolean =
+    internal fun confirmServiceConnected(
+        context: Context,
+        observedAttemptId: String?,
+        onConnectionAccepted: () -> Boolean,
+    ): SensitiveConnectionConfirmation =
         synchronized(transitionLock) {
-        val appContext = context.applicationContext
-        val session = currentSession(appContext)
-            ?: return@synchronized observedAttemptId == null
-        val ownServiceEnabled = AccessibilityServiceListEditor.contains(
-            enabledServices(appContext),
-            accessibilityComponent(appContext),
-        )
-        if (!SensitiveRecoveryRules.mayConfirm(
-                phase = session.phase,
-                currentAttemptId = session.restoreAttemptId,
-                observedAttemptId = observedAttemptId,
-                ownServiceEnabled = ownServiceEnabled,
+            val appContext = context.applicationContext
+            val session = currentSession(appContext)
+            if (session == null) {
+                if (observedAttemptId != null) {
+                    return@synchronized SensitiveConnectionConfirmation.REJECTED
+                }
+                return@synchronized if (runCatching(onConnectionAccepted).getOrDefault(false)) {
+                    SensitiveConnectionConfirmation.CONNECTED
+                } else {
+                    SensitiveConnectionConfirmation.REJECTED
+                }
+            }
+            val ownServiceEnabled = AccessibilityServiceListEditor.contains(
+                enabledServices(appContext),
+                accessibilityComponent(appContext),
             )
-        ) {
-            return@synchronized false
+            if (!SensitiveRecoveryRules.mayConfirm(
+                    phase = session.phase,
+                    currentAttemptId = session.restoreAttemptId,
+                    observedAttemptId = observedAttemptId,
+                    ownServiceEnabled = ownServiceEnabled,
+                )
+            ) {
+                return@synchronized SensitiveConnectionConfirmation.REJECTED
+            }
+            // owner 接管与新鲜心跳必须先于会话清除；否则外界可能看到“恢复完成”但服务
+            // 尚未真正接管，旧实例的迟到 onDestroy 也可能在这个窗口清掉心跳。
+            if (!runCatching(onConnectionAccepted).getOrDefault(false)) {
+                SensitiveModeNotifier.showRestoreFailed(appContext)
+                return@synchronized SensitiveConnectionConfirmation.REJECTED
+            }
+            if (!clearSession(appContext, session.id, cancelScheduledWork = true)) {
+                // 连接和耐久心跳已经成立；会话清理失败只保留恢复告警，不能让 Service
+                // 回滚为“不采集”，否则 UI/心跳显示在线但所有事件会被静默丢弃。
+                SensitiveModeNotifier.showRestoreFailed(appContext, session)
+                return@synchronized SensitiveConnectionConfirmation.CONNECTED_SESSION_PENDING
+            }
+            SensitiveModeNotifier.cancel(appContext)
+            SensitiveConnectionConfirmation.CONNECTED
         }
-        if (!clearSession(appContext, session.id, cancelScheduledWork = true)) {
-            SensitiveModeNotifier.showRestoreFailed(appContext)
-            return@synchronized false
-        }
-        SensitiveModeNotifier.cancel(appContext)
-        true
-    }
 
     internal fun currentRestoreAttemptId(context: Context): String? =
         currentSession(context)?.takeIf { it.phase == SensitiveLaunchPhase.RECOVERING }
@@ -480,24 +511,48 @@ object SensitiveAppMode {
 
 /** 保持原有顺序的纯函数列表编辑器，确保不覆盖其他无障碍服务。 */
 internal object AccessibilityServiceListEditor {
-    fun contains(raw: String?, component: String): Boolean = parse(raw).any { it == component }
+    fun contains(raw: String?, component: String): Boolean {
+        val expected = canonicalIdentity(component)
+        return parse(raw).any { canonicalIdentity(it) == expected }
+    }
 
-    fun remove(raw: String?, component: String): String = parse(raw)
-        .filterNot { it == component }
+    fun remove(raw: String?, component: String): String {
+        val expected = canonicalIdentity(component)
+        return parse(raw)
+        .filterNot { canonicalIdentity(it) == expected }
         .joinToString(":")
+    }
 
     fun add(raw: String?, component: String): String = parse(raw)
         .toMutableList()
-        .apply { if (none { it == component }) add(component) }
+        .apply {
+            val expected = canonicalIdentity(component)
+            if (none { canonicalIdentity(it) == expected }) add(component)
+        }
         .joinToString(":")
 
-    fun without(raw: String?, component: String): List<String> = parse(raw).filterNot { it == component }
+    /** 用规范身份比较读回结果；原始字符串的缩写/完整写法变化不代表其他服务被修改。 */
+    fun without(raw: String?, component: String): List<String> {
+        val expected = canonicalIdentity(component)
+        return parse(raw)
+            .map(::canonicalIdentity)
+            .filterNot { it == expected }
+    }
 
     private fun parse(raw: String?): List<String> = raw.orEmpty()
         .split(':')
         .map(String::trim)
         .filter(String::isNotEmpty)
-        .distinct()
+        .distinctBy(::canonicalIdentity)
+
+    private fun canonicalIdentity(component: String): String {
+        val separator = component.indexOf('/')
+        if (separator <= 0 || separator == component.lastIndex) return component
+        val packageName = component.substring(0, separator)
+        val className = component.substring(separator + 1)
+        val expandedClass = if (className.startsWith('.')) "$packageName$className" else className
+        return "$packageName/$expandedClass"
+    }
 }
 
 class SensitiveAppLaunchActivity : Activity() {
@@ -772,9 +827,14 @@ internal object SensitiveModeNotifier {
 
     @SuppressLint("MissingPermission")
     fun showRestoreFailed(context: Context) {
+        val session = SensitiveAppMode.currentSession(context) ?: return
+        showRestoreFailed(context, session)
+    }
+
+    @SuppressLint("MissingPermission")
+    fun showRestoreFailed(context: Context, session: SensitiveSession) {
         if (!canNotify(context)) return
         ensureChannel(context)
-        val session = SensitiveAppMode.currentSession(context) ?: return
         val open = PendingIntent.getActivity(
             context,
             3,
@@ -834,7 +894,15 @@ internal object SensitiveModeNotifier {
         runCatching {
             val manager = context.getSystemService(NotificationManager::class.java)
             manager.notify(id, notification)
-            manager.activeNotifications.any { it.id == id }
+            // NotificationManager 入队是异步的；小米在系统繁忙时立即读回会短暂为空。
+            // 最多等待 1 秒确认通知真正可见，仍保持“可撤销通知成立后才允许暂停”的门槛。
+            repeat(40) {
+                if (manager.activeNotifications.any { it.id == id }) {
+                    return@runCatching true
+                }
+                android.os.SystemClock.sleep(25L)
+            }
+            false
         }.getOrDefault(false)
 
     private fun restoreIntent(context: Context, sessionId: String): Intent =
