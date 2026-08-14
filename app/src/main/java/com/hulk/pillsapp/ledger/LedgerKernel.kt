@@ -136,6 +136,13 @@ object LedgerKernel {
     private val behaviorExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "behavior-ingest")
     }
+    /**
+     * 无障碍暂停/恢复缺口必须严格有序，且不得排在通知 outbox 重放之后。
+     * PREPARING 会话本身是崩溃后的耐久重试依据。
+     */
+    private val a11yLifecycleExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "a11y-lifecycle-integrity")
+    }
     private val callbackExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "system-callback-ingest")
     }
@@ -730,7 +737,7 @@ object LedgerKernel {
                 .putLong(PREF_LAST_A11Y_HEARTBEAT_AT, 0L)
                 .commit()
         ) { "无障碍暂停心跳无法持久化" }
-        runCallbackSync {
+        a11yLifecycleExecutor.submit {
             val dao = requireDb().coverageGapDao()
             if (dao.countOpenByDetector(GapDetectors.A11Y_SERVICE) == 0L) {
                 dao.insert(
@@ -743,7 +750,7 @@ object LedgerKernel {
                     )
                 )
             }
-        }
+        }.get(3, TimeUnit.SECONDS)
         submitAsync { refreshStatusBlocking() }
     }
 
@@ -876,7 +883,7 @@ object LedgerKernel {
 
     private fun scheduleA11yGapClose() {
         runCatching {
-            behaviorExecutor.submit {
+            a11yLifecycleExecutor.submit {
                 runCatching {
                     requireDb().coverageGapDao().closeOpenByDetector(
                         GapDetectors.A11Y_SERVICE,
@@ -903,23 +910,25 @@ object LedgerKernel {
     fun markA11yDisconnected(note: String) {
         appContext?.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             ?.edit()?.putLong(PREF_LAST_A11Y_HEARTBEAT_AT, 0L)?.apply()
-        behaviorExecutor.submit {
-            runCatching {
-                val dao = requireDb().coverageGapDao()
-                if (dao.countOpenByDetector(GapDetectors.A11Y_SERVICE) == 0L) {
-                    dao.insert(
-                        CoverageGapEntity(
-                            detector = GapDetectors.A11Y_SERVICE,
-                            startedAtMs = System.currentTimeMillis(),
-                            endedAtMs = null,
-                            state = GapState.ACTIVE,
-                            note = note,
+        runCatching {
+            a11yLifecycleExecutor.submit {
+                runCatching {
+                    val dao = requireDb().coverageGapDao()
+                    if (dao.countOpenByDetector(GapDetectors.A11Y_SERVICE) == 0L) {
+                        dao.insert(
+                            CoverageGapEntity(
+                                detector = GapDetectors.A11Y_SERVICE,
+                                startedAtMs = System.currentTimeMillis(),
+                                endedAtMs = null,
+                                state = GapState.ACTIVE,
+                                note = note,
+                            )
                         )
-                    )
-                }
-                refreshStatusBlocking()
-            }.onFailure(::recordAsyncFailure)
-        }
+                    }
+                    refreshStatusBlocking()
+                }.onFailure(::recordAsyncFailure)
+            }
+        }.onFailure(::recordAsyncFailure)
     }
 
     /** 专用高优先级执行器直接持久化，不让无障碍主回调等待共享队列或抛超时。 */

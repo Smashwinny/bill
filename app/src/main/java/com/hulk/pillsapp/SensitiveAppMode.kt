@@ -71,6 +71,23 @@ internal data class SensitiveSession(
     val exitPrompted: Boolean,
 )
 
+/** 只记录恢复失败的步骤与异常类型，不写包名、账户或页面内容。 */
+internal object SensitiveRestoreDiagnostics {
+    private const val FILE_NAME = "sensitive_restore_failure.txt"
+
+    fun record(context: Context, stage: String, failure: Throwable? = null) {
+        runCatching {
+            java.io.File(context.filesDir, FILE_NAME).writeText(
+                "stage=$stage\ntype=${failure?.javaClass?.name ?: "none"}\nat_ms=${System.currentTimeMillis()}\n"
+            )
+        }
+    }
+
+    fun clear(context: Context) {
+        runCatching { java.io.File(context.filesDir, FILE_NAME).delete() }
+    }
+}
+
 internal object SensitiveRecoveryRules {
     fun mayConfirm(
         phase: SensitiveLaunchPhase,
@@ -227,22 +244,25 @@ object SensitiveAppMode {
             !AccessibilityServiceListEditor.contains(readBack, component) &&
             AccessibilityServiceListEditor.without(readBack, component) == expectedOthers
         if (!settingsVerified) {
+            SensitiveRestoreDiagnostics.record(appContext, "PAUSE_REMOVE_READBACK")
             restoreLocked(appContext, session.id)
             return@synchronized SensitivePauseResult.SETTINGS_WRITE_FAILED
         }
 
         // 不依赖 Service.onDestroy：系统写入一旦确认，就同步持久化覆盖缺口再允许启动银行。
-        val gapPersisted = runCatching {
+        val gapResult = runCatching {
             LedgerKernel.markA11yPaused(
                 "${target.label} 安全模式：用户授权临时暂停行为监视",
             )
-        }.isSuccess
-        if (!gapPersisted) {
+        }
+        if (gapResult.isFailure) {
+            SensitiveRestoreDiagnostics.record(appContext, "PAUSE_GAP", gapResult.exceptionOrNull())
             restoreLocked(appContext, session.id)
             return@synchronized SensitivePauseResult.SETTINGS_WRITE_FAILED
         }
         // 通知必须晚于“移除 + 读回 + 缺口落盘”，避免恢复动作抢跑暂停流程。
         if (!SensitiveModeNotifier.showPaused(appContext, session)) {
+            SensitiveRestoreDiagnostics.record(appContext, "PAUSE_NOTIFICATION")
             restoreLocked(appContext, session.id)
             return@synchronized SensitivePauseResult.MISSING_NOTIFICATION_PERMISSION
         }
@@ -251,6 +271,7 @@ object SensitiveAppMode {
                 .putString(KEY_PHASE, SensitiveLaunchPhase.PAUSED.name)
                 .commit()
         ) {
+            SensitiveRestoreDiagnostics.record(appContext, "PAUSE_SESSION_COMMIT")
             restoreLocked(appContext, session.id)
             return@synchronized SensitivePauseResult.SETTINGS_WRITE_FAILED
         }
@@ -271,7 +292,10 @@ object SensitiveAppMode {
         val session = currentSession(appContext) ?: return true
         // 旧 Worker/旧通知永远不能结束新会话。
         if (expectedSessionId != null && session.id != expectedSessionId) return true
-        if (!hasControlPermission(appContext)) return false
+        if (!hasControlPermission(appContext)) {
+            SensitiveRestoreDiagnostics.record(appContext, "CONTROL_PERMISSION")
+            return false
+        }
         SensitiveSessionMonitorService.stop(appContext)
         val component = accessibilityComponent(appContext)
         var beforeWrite = enabledServices(appContext)
@@ -279,7 +303,8 @@ object SensitiveAppMode {
             // 进程可能在移除组件前或后死亡；统一记录不确定区间并强制走一次真实重连。
             runCatching {
                 LedgerKernel.markA11yPaused("敏感应用安全模式准备中断：恢复前覆盖状态不确定")
-            }.getOrElse {
+            }.getOrElse { failure ->
+                SensitiveRestoreDiagnostics.record(appContext, "PREPARING_GAP", failure)
                 SensitiveModeNotifier.showRestoreFailed(appContext)
                 return false
             }
@@ -290,6 +315,7 @@ object SensitiveAppMode {
                 .putString(KEY_RESTORE_ATTEMPT_ID, restoreAttemptId)
                 .commit()
         ) {
+            SensitiveRestoreDiagnostics.record(appContext, "RECOVERING_SESSION_COMMIT")
             SensitiveModeNotifier.showRestoreFailed(appContext)
             return false
         }
@@ -306,10 +332,21 @@ object SensitiveAppMode {
             if (!removed || AccessibilityServiceListEditor.contains(removedReadBack, component) ||
                 AccessibilityServiceListEditor.without(removedReadBack, component) != retryOthers
             ) {
+                SensitiveRestoreDiagnostics.record(appContext, "REMOVE_STALE_COMPONENT")
                 SensitiveModeNotifier.showRestoreFailed(appContext)
                 return false
             }
-            beforeWrite = removedReadBack
+            // HyperOS 对 enabled_accessibility_services 的 Binder 解绑是异步的；
+            // 立即写回相同组件可被折叠，“已启用但 Crashed”将永不重绑。
+            android.os.SystemClock.sleep(500L)
+            val settledWithoutOwn = enabledServices(appContext)
+            if (AccessibilityServiceListEditor.contains(settledWithoutOwn, component)) {
+                SensitiveRestoreDiagnostics.record(appContext, "REMOVE_STALE_COMPONENT_SETTLE")
+                SensitiveModeNotifier.showRestoreFailed(appContext)
+                return false
+            }
+            // 等待窗口内其他服务若有变化，以最新列表为准，不回写旧快照。
+            beforeWrite = settledWithoutOwn
         }
         val expectedOthers = AccessibilityServiceListEditor.without(beforeWrite, component)
         val updated = AccessibilityServiceListEditor.add(beforeWrite, component)
@@ -334,10 +371,12 @@ object SensitiveAppMode {
                     restoreAttemptId,
                 )
             ) {
+                SensitiveRestoreDiagnostics.record(appContext, "RECOVERY_CHECK_SCHEDULE")
                 SensitiveModeNotifier.showRestoreFailed(appContext)
             }
             return true
         } else {
+            SensitiveRestoreDiagnostics.record(appContext, "ADD_COMPONENT_READBACK")
             SensitiveModeNotifier.showRestoreFailed(appContext)
         }
         return restored
@@ -390,6 +429,7 @@ object SensitiveAppMode {
                 SensitiveModeNotifier.showRestoreFailed(appContext, session)
                 return@synchronized SensitiveConnectionConfirmation.CONNECTED_SESSION_PENDING
             }
+            SensitiveRestoreDiagnostics.clear(appContext)
             SensitiveModeNotifier.cancel(appContext, session)
             SensitiveConnectionConfirmation.CONNECTED
         }

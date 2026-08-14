@@ -25,12 +25,12 @@ class SensitiveAppModeInstrumentedTest {
         assumeTrue("behavior accessibility service must start enabled", component in before)
         var activeSessionId: String? = null
         val targetPackage = context.packageName
-        val alreadyRegistered = SensitiveAppRegistry.activeProfile(context, targetPackage) != null
         assertTrue(
             PackageIdentityResolver.resolve(context, targetPackage)?.let {
                 SensitiveAppRegistry.add(context, it, SensitiveProfileOrigin.USER_SELECTED)
             } == true
         )
+        var restoreAccepted: Boolean
 
         try {
             assertEquals(
@@ -63,12 +63,14 @@ class SensitiveAppModeInstrumentedTest {
                 SensitiveAppMode.currentSession(context)?.phase,
             )
         } finally {
-            assertTrue(SensitiveAppMode.restore(context))
+            restoreAccepted = SensitiveAppMode.restore(context)
             activeSessionId?.let {
                 assertFalse("RECOVERING must never pass the launch CAS", SensitiveAppMode.markTargetLaunched(context, it))
             }
-            if (!alreadyRegistered) SensitiveAppRegistry.remove(context, targetPackage)
+            // 测试只用本 App 作为无害目标；即使恢复断言失败也必须清理该配置。
+            SensitiveAppRegistry.remove(context, targetPackage)
         }
+        assertTrue("restore request must be accepted", restoreAccepted)
 
         awaitCondition("accessibility service must reconnect and confirm recovery") {
             component in enabledComponents(context) && !SensitiveAppMode.isActive(context)
