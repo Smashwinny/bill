@@ -14,6 +14,51 @@ import org.junit.Test
  */
 class KernelLogicTest {
     @Test
+    fun bootAuditContinuesAfterIndividualSchedulingFailures() {
+        val events = mutableListOf<String>()
+
+        BootHealthAudit.run(
+            notificationHealthy = false,
+            behaviorHealthy = false,
+            openGap = { detector, _ ->
+                events += detector
+                if (detector == GapDetectors.BOOT_CHECK) error("injected queue rejection")
+            },
+            enqueueHealthCheck = {
+                events += "health-check"
+                error("injected WorkManager failure")
+            },
+        )
+
+        assertEquals(
+            listOf(GapDetectors.BOOT_CHECK, GapDetectors.A11Y_SERVICE, "health-check"),
+            events,
+        )
+    }
+
+    @Test
+    fun healthyBootOnlyEnqueuesPeriodicCheck() {
+        val events = mutableListOf<String>()
+
+        BootHealthAudit.run(
+            notificationHealthy = true,
+            behaviorHealthy = true,
+            openGap = { detector, _ -> events += detector },
+            enqueueHealthCheck = { events += "health-check" },
+        )
+
+        assertEquals(listOf("health-check"), events)
+    }
+
+    @Test
+    fun realNotificationConnectionClosesBootAndCallbackGaps() {
+        assertEquals(
+            listOf(GapDetectors.LISTENER_CALLBACK, GapDetectors.BOOT_CHECK),
+            NotificationListenerRecoveryPolicy.detectorsClosedOnConnection,
+        )
+    }
+
+    @Test
     fun durableObservationSchedulesParseBeforeOutboxCompletionFailure() {
         val events = mutableListOf<String>()
         val failure = runCatching {

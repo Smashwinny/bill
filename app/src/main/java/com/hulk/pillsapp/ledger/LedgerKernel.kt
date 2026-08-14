@@ -334,13 +334,18 @@ object LedgerKernel {
         }
 
     private fun submitAsync(block: () -> Unit) {
-        executor.submit {
-            try {
-                block()
-            } catch (failure: Throwable) {
-                // 不记录异常消息（可能含敏感内容），但留下类型与时间，避免完整性故障静默。
-                recordAsyncFailure(failure)
+        try {
+            executor.submit {
+                try {
+                    block()
+                } catch (failure: Throwable) {
+                    // 不记录异常消息（可能含敏感内容），但留下类型与时间，避免完整性故障静默。
+                    recordAsyncFailure(failure)
+                }
             }
+        } catch (failure: Throwable) {
+            // 进程正在退出时执行器可能拒绝任务；系统回调不应因此崩溃。
+            recordAsyncFailure(failure)
         }
     }
 
@@ -696,6 +701,19 @@ object LedgerKernel {
     ) {
         submitAsync {
             requireDb().coverageGapDao().closeOpenByDetector(detector, endedAtMs)
+            refreshStatusBlocking()
+        }
+    }
+
+    /** 监听器真实连接的单队列恢复事务，避免开机缺口永久滞留为 ACTIVE。 */
+    fun closeNotificationListenerGapsAsync(
+        endedAtMs: Long = System.currentTimeMillis(),
+    ) {
+        submitAsync {
+            val dao = requireDb().coverageGapDao()
+            NotificationListenerRecoveryPolicy.detectorsClosedOnConnection.forEach { detector ->
+                dao.closeOpenByDetector(detector, endedAtMs)
+            }
             refreshStatusBlocking()
         }
     }

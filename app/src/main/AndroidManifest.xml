@@ -15,10 +15,24 @@
     <!-- HyperOS 保活引导：请求加入电池优化白名单 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 仅在敏感会话期间读取包级前后台切换，用于升级人工恢复提示；不保存使用历史。 -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- 个人侧载版 M5.2：ADB 一次授权后，安全模式只增删本 App 的无障碍组件。 -->
     <uses-permission
         android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
+
+    <queries>
+        <!-- 手动学习只列出具有桌面启动入口的应用，不申请全量包可见性。 -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <application
         android:name=".PillsApp"
@@ -60,12 +74,31 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/behavior_accessibility_service" />
         </service>
+        <service
+            android:name=".SensitiveSessionMonitorService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="仅在敏感应用暂停会话期间判断目标包是否仍在前台，并提示用户确认恢复" />
+        </service>
         <receiver
             android:name=".ledger.BehaviorCandidateActionReceiver"
             android:exported="false" />
         <receiver
             android:name=".SensitiveModeRestoreReceiver"
             android:exported="false" />
+        <receiver
+            android:name=".SensitivePackageChangeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PACKAGE_ADDED" />
+                <action android:name="android.intent.action.PACKAGE_CHANGED" />
+                <action android:name="android.intent.action.PACKAGE_REMOVED" />
+                <action android:name="android.intent.action.PACKAGE_REPLACED" />
+                <data android:scheme="package" />
+            </intent-filter>
+        </receiver>
         <receiver
             android:name=".ledger.BootReceiver"
             android:exported="true">

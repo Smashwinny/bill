@@ -78,8 +78,17 @@ object GapDetectors {
     const val HEALTH_CHECK = "HEALTH_CHECK"
     const val A11Y_SERVICE = "A11Y_SERVICE"
     const val A11Y_AMBIGUOUS_REPEAT = "A11Y_AMBIGUOUS_REPEAT"
+    const val A11Y_PROFILE_GUARD = "A11Y_PROFILE_GUARD"
     const val CALLBACK_PERSISTENCE = "CALLBACK_PERSISTENCE"
     const val CALLBACK_OUTBOX = "CALLBACK_OUTBOX"
+}
+
+/** 只有 NotificationListenerService 真实连接后才能结束的监听覆盖缺口。 */
+internal object NotificationListenerRecoveryPolicy {
+    val detectorsClosedOnConnection: List<String> = listOf(
+        GapDetectors.LISTENER_CALLBACK,
+        GapDetectors.BOOT_CHECK,
+    )
 }
 
 @Entity(

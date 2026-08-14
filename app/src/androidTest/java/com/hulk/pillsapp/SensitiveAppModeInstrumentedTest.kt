@@ -24,11 +24,18 @@ class SensitiveAppModeInstrumentedTest {
         val before = enabledComponents(context)
         assumeTrue("behavior accessibility service must start enabled", component in before)
         var activeSessionId: String? = null
+        val targetPackage = context.packageName
+        val alreadyRegistered = SensitiveAppRegistry.activeProfile(context, targetPackage) != null
+        assertTrue(
+            PackageIdentityResolver.resolve(context, targetPackage)?.let {
+                SensitiveAppRegistry.add(context, it, SensitiveProfileOrigin.USER_SELECTED)
+            } == true
+        )
 
         try {
             assertEquals(
                 SensitivePauseResult.PAUSED,
-                SensitiveAppMode.pause(context, "test.sensitive.package", "仪器测试"),
+                SensitiveAppMode.pauseForPackage(context, targetPackage),
             )
             val paused = enabledComponents(context)
             assertFalse(component in paused)
@@ -49,8 +56,8 @@ class SensitiveAppModeInstrumentedTest {
             assertFalse(component in enabledComponents(context))
             assertTrue(SensitiveAppMode.isActive(context))
 
-            assertTrue(SensitiveAppMode.markBankLaunched(context, session.id))
-            assertFalse("the same session cannot launch the bank twice", SensitiveAppMode.markBankLaunched(context, session.id))
+            assertTrue(SensitiveAppMode.markTargetLaunched(context, session.id))
+            assertFalse("the same session cannot launch the target twice", SensitiveAppMode.markTargetLaunched(context, session.id))
             assertEquals(
                 SensitiveLaunchPhase.LAUNCHED,
                 SensitiveAppMode.currentSession(context)?.phase,
@@ -58,8 +65,9 @@ class SensitiveAppModeInstrumentedTest {
         } finally {
             assertTrue(SensitiveAppMode.restore(context))
             activeSessionId?.let {
-                assertFalse("RECOVERING must never pass the launch CAS", SensitiveAppMode.markBankLaunched(context, it))
+                assertFalse("RECOVERING must never pass the launch CAS", SensitiveAppMode.markTargetLaunched(context, it))
             }
+            if (!alreadyRegistered) SensitiveAppRegistry.remove(context, targetPackage)
         }
 
         awaitCondition("accessibility service must reconnect and confirm recovery") {

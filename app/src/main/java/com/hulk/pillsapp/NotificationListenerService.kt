@@ -22,8 +22,9 @@ class NotificationListenerService : AndroidNotificationListenerService() {
         val connectedAtMs = System.currentTimeMillis()
         super.onListenerConnected()
         NotificationListenerState.setConnected()
-        // 生命周期回调不等待共享队列；关闭缺口与补偿扫描按同一执行器顺序入队。
-        LedgerKernel.closeOpenGapsAsync(GapDetectors.LISTENER_CALLBACK, connectedAtMs)
+        // 真实连接同时结束断线与开机发现的监听缺口；历史行保留供对账。
+        // 生命周期回调不等待共享队列，补偿扫描在其后按同一执行器入队。
+        LedgerKernel.closeNotificationListenerGapsAsync(connectedAtMs)
         LedgerKernel.sweepActiveNotifications(activeNotifications?.toList().orEmpty())
     }
 

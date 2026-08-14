@@ -21,10 +21,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -47,8 +52,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.drawable.toBitmap
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.hulk.pillsapp.ledger.LedgerKernel
 import com.hulk.pillsapp.ledger.BehaviorCandidateEntity
 import com.hulk.pillsapp.ledger.BehaviorCandidateState
@@ -161,13 +170,19 @@ class MainActivity : ComponentActivity() {
                                 refreshState(this@MainActivity)
                             }
                         },
-                        onSafeLaunchCmb = {
-                            startActivity(Intent(this@MainActivity, SensitiveAppLaunchActivity::class.java))
+                        onSafeLaunchSensitive = { packageName ->
+                            startActivity(SensitiveAppLaunchActivity.intent(this@MainActivity, packageName))
+                        },
+                        onOpenUsageAccessSettings = {
+                            permissionLauncher.launch(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
                         },
                         onRestoreSensitiveMode = {
-                            thread(name = "sensitive-mode-manual-restore") {
-                                SensitiveAppMode.restore(this@MainActivity)
-                                runOnUiThread { refreshState(this@MainActivity) }
+                            val expectedSessionId = SensitiveAppMode.currentSession(this@MainActivity)?.id
+                            if (expectedSessionId != null) {
+                                thread(name = "sensitive-mode-manual-restore") {
+                                    SensitiveAppMode.restore(this@MainActivity, expectedSessionId)
+                                    runOnUiThread { refreshState(this@MainActivity) }
+                                }
                             }
                         },
                         onOpenNotificationAccessPage = {
@@ -256,7 +271,8 @@ private fun AppHome(
     refreshTick: Int,
     onOpenAccessibilitySettings: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
-    onSafeLaunchCmb: () -> Unit,
+    onSafeLaunchSensitive: (String) -> Unit,
+    onOpenUsageAccessSettings: () -> Unit,
     onRestoreSensitiveMode: () -> Unit,
     onOpenNotificationAccessPage: () -> Unit,
     onRequestSmsPermissions: () -> Unit,
@@ -298,8 +314,10 @@ private fun AppHome(
             refreshTick = refreshTick,
             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
             onRequestNotificationPermission = onRequestNotificationPermission,
-            onSafeLaunchCmb = onSafeLaunchCmb,
+            onSafeLaunchSensitive = onSafeLaunchSensitive,
+            onOpenUsageAccessSettings = onOpenUsageAccessSettings,
             onRestoreSensitiveMode = onRestoreSensitiveMode,
+            onRefresh = onRefresh,
         )
         KernelStatusSection()
         M2ChannelSection(
@@ -714,15 +732,26 @@ private val behaviorStateLabels = mapOf(
     BehaviorCandidateState.UNDONE to "自动记账已撤销",
 )
 
+private data class SensitiveRegistryUiState(
+    val profiles: List<SensitiveProfileView> = emptyList(),
+    val suggestion: SensitiveAppSuggestion? = null,
+    val recentExternalApp: LaunchableApp? = null,
+    val storageHealthy: Boolean = true,
+    val loading: Boolean = true,
+)
+
 @Composable
 private fun BehaviorLearningSection(
     refreshTick: Int,
     onOpenAccessibilitySettings: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
-    onSafeLaunchCmb: () -> Unit,
+    onSafeLaunchSensitive: (String) -> Unit,
+    onOpenUsageAccessSettings: () -> Unit,
     onRestoreSensitiveMode: () -> Unit,
+    onRefresh: () -> Unit,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val accessibility by BehaviorAccessibilityState.state.collectAsState()
     val status by LedgerKernel.status.collectAsState()
     val notificationGranted = remember(refreshTick) {
@@ -731,13 +760,33 @@ private fun BehaviorLearningSection(
     val sensitiveControlGranted = remember(refreshTick) {
         SensitiveAppMode.hasControlPermission(context)
     }
-    val cmbInstalled = remember(refreshTick) {
-        SensitiveAppMode.isTargetInstalled(context)
+    val usageAccessGranted = remember(refreshTick) { UsageAccessState.isGranted(context) }
+    var registryUi by remember { mutableStateOf(SensitiveRegistryUiState()) }
+    LaunchedEffect(refreshTick, usageAccessGranted) {
+        registryUi = withContext(Dispatchers.IO) {
+            SensitiveRegistryUiState(
+                profiles = SensitiveAppRegistry.profiles(context),
+                suggestion = SensitiveAppRegistry.suggestion(context),
+                recentExternalApp = if (usageAccessGranted) {
+                    UsageAccessState.recentExternalApp(context)
+                } else {
+                    null
+                },
+                storageHealthy = SensitiveAppRegistry.storageHealthy(context),
+                loading = false,
+            )
+        }
     }
+    val profiles = registryUi.profiles
+    val suggestion = registryUi.suggestion
+    val recentExternalApp = registryUi.recentExternalApp
+    val registryHealthy = registryUi.storageHealthy
     val sensitiveSession = remember(refreshTick) {
         SensitiveAppMode.currentSession(context)
     }
     val sensitiveModeActive = sensitiveSession != null
+    var showSensitivePicker by remember { mutableStateOf(false) }
+    var sensitivePickerSearch by remember { mutableStateOf("") }
     Spacer(modifier = Modifier.height(16.dp))
     Text(text = "行为学习记账（M5 第一版）")
     Text(
@@ -752,20 +801,98 @@ private fun BehaviorLearningSection(
     Text(
         text = when {
             sensitiveSession?.phase == SensitiveLaunchPhase.RECOVERING ->
-                "招商银行安全模式：系统设置已写回，正在等待行为监视真正连接"
-            sensitiveModeActive -> "招商银行安全模式：行为监视已真正暂停；返回后恢复，15 分钟仅提醒确认"
-            sensitiveControlGranted -> "招商银行安全模式：已获得个人设备控制权限"
-            else -> "招商银行安全模式：待 ADB 授权，未授权时不会冒险启动银行"
+                "${sensitiveSession.targetLabel} 安全模式：正在等待行为监视真正连接"
+            sensitiveModeActive ->
+                "${sensitiveSession?.targetLabel} 安全模式：行为监视已暂停；离开后需同会话返回或点通知确认"
+            sensitiveControlGranted -> "敏感应用安全模式：已获得个人设备控制权限"
+            else -> "敏感应用安全模式：待 ADB 授权，未授权时不会冒险启动"
         }
     )
-    if (cmbInstalled) {
-        Button(
-            onClick = onSafeLaunchCmb,
-            enabled = sensitiveControlGranted && notificationGranted && !sensitiveModeActive,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("安全打开招商银行")
+    Text(
+        "长期注册表加密保存包身份/签名；活动会话仅暂存在 App 私有存储，恢复后清除。不会保存页面原文。"
+    )
+    Text(
+        "会话观察：${if (usageAccessGranted) "已授权，仅用于提示疑似离开" else "未授权，离开后依赖返回页或通知"}"
+    )
+    if (!usageAccessGranted) {
+        Button(onClick = onOpenUsageAccessSettings, modifier = Modifier.fillMaxWidth()) {
+            Text("允许敏感会话前后台判断")
         }
+    }
+    if (!registryHealthy) {
+        Text("敏感应用加密注册表不可读：已停止自动识别，请勿覆盖，需先恢复数据。")
+    }
+    if (registryUi.loading) {
+        Text("正在后台读取敏感应用注册表…")
+    }
+    suggestion?.let { pending ->
+        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("检测到可能需要安全模式：${pending.identity.label}")
+                Text("${pending.identity.packageName} · 仅保存风险类别，未保存提示原文")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        scope.launch {
+                            val confirmed = withContext(Dispatchers.IO) {
+                                SensitiveAppRegistry.confirmSuggestion(context, pending)
+                            }
+                            if (confirmed) SensitiveModeNotifier.cancelSuggestion(context)
+                            onRefresh()
+                        }
+                    }) { Text("确认学习") }
+                    TextButton(onClick = {
+                        scope.launch {
+                            withContext(Dispatchers.IO) { SensitiveAppRegistry.dismissSuggestion(context) }
+                            SensitiveModeNotifier.cancelSuggestion(context)
+                            onRefresh()
+                        }
+                    }) { Text("忽略") }
+                }
+            }
+        }
+    }
+    recentExternalApp?.takeIf { recent -> profiles.none { it.profile.identity.packageName == recent.packageName } }
+        ?.let { recent ->
+            Button(
+                onClick = {
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            SensitiveAppRegistry.add(
+                                context,
+                                recent.identity,
+                                SensitiveProfileOrigin.USER_SELECTED,
+                            )
+                        }
+                        onRefresh()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("将最近使用的 ${recent.label} 加入敏感应用")
+            }
+        }
+    Button(
+        onClick = { showSensitivePicker = true },
+        enabled = registryHealthy,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("从已安装应用中选择敏感应用")
+    }
+    profiles.forEach { view ->
+        SensitiveProfileCard(
+            view = view,
+            activeSessionPackage = sensitiveSession?.targetPackage,
+            canLaunch = sensitiveControlGranted && notificationGranted && !sensitiveModeActive,
+            onSafeLaunch = { onSafeLaunchSensitive(view.profile.identity.packageName) },
+            onRemove = {
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        SensitiveAppRegistry.remove(context, view.profile.identity.packageName)
+                    }
+                    onRefresh()
+                }
+            },
+        )
     }
     if (sensitiveModeActive) {
         Button(
@@ -776,7 +903,7 @@ private fun BehaviorLearningSection(
                 if (sensitiveSession?.phase == SensitiveLaunchPhase.RECOVERING) {
                     "重试恢复监视"
                 } else {
-                    "已离开银行，立即恢复监视"
+                    "已结束敏感应用流程，立即恢复监视"
                 }
             )
         }
@@ -790,6 +917,33 @@ private fun BehaviorLearningSection(
         Button(onClick = onRequestNotificationPermission, modifier = Modifier.fillMaxWidth()) {
             Text("允许弹出付款确认通知")
         }
+    }
+    if (showSensitivePicker) {
+        SensitiveAppPickerDialog(
+            search = sensitivePickerSearch,
+            onSearchChange = { sensitivePickerSearch = it },
+            existingPackages = profiles.map { it.profile.identity.packageName }.toSet(),
+            onSelect = { selected ->
+                scope.launch {
+                    val added = withContext(Dispatchers.IO) {
+                        SensitiveAppRegistry.add(
+                            context,
+                            selected.identity,
+                            SensitiveProfileOrigin.USER_SELECTED,
+                        )
+                    }
+                    if (added) {
+                        showSensitivePicker = false
+                        sensitivePickerSearch = ""
+                        onRefresh()
+                    }
+                }
+            },
+            onDismiss = {
+                showSensitivePicker = false
+                sensitivePickerSearch = ""
+            },
+        )
     }
     if (BuildConfig.DEBUG) {
         Button(
@@ -806,6 +960,123 @@ private fun BehaviorLearningSection(
         status.behaviorCandidates.take(30).forEach { candidate ->
             BehaviorCandidateCard(candidate)
         }
+    }
+}
+
+@Composable
+private fun SensitiveProfileCard(
+    view: SensitiveProfileView,
+    activeSessionPackage: String?,
+    canLaunch: Boolean,
+    onSafeLaunch: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val identity = view.profile.identity
+    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SensitiveAppIcon(identity.packageName)
+                Spacer(modifier = Modifier.size(8.dp))
+                Column(modifier = Modifier.fillMaxWidth(0.78f)) {
+                    Text(identity.label)
+                    Text(identity.packageName)
+                    Text(
+                        when {
+                            !view.installed -> "应用已卸载"
+                            !view.identityStillValid -> "签名身份已变化，请移除后重新确认"
+                            else -> "身份已确认 · ${view.profile.origin.name}"
+                        }
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onSafeLaunch,
+                    enabled = canLaunch && view.installed && view.identityStillValid,
+                ) { Text("安全打开") }
+                TextButton(
+                    onClick = onRemove,
+                    enabled = activeSessionPackage != identity.packageName,
+                ) { Text("移除") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SensitiveAppPickerDialog(
+    search: String,
+    onSearchChange: (String) -> Unit,
+    existingPackages: Set<String>,
+    onSelect: (LaunchableApp) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    var apps by remember { mutableStateOf<List<LaunchableApp>?>(null) }
+    LaunchedEffect(Unit) {
+        apps = withContext(Dispatchers.IO) { PackageIdentityResolver.launchableApps(context) }
+    }
+    val filtered = remember(apps, search, existingPackages) {
+        apps.orEmpty().filter { it.packageName !in existingPackages }
+            .filter {
+                search.isBlank() || it.label.contains(search, ignoreCase = true) ||
+                    it.packageName.contains(search, ignoreCase = true)
+            }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择敏感应用") },
+        text = {
+            Column {
+                if (apps == null) Text("正在后台读取已安装应用…")
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = onSearchChange,
+                    label = { Text("搜索名称或包名") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                LazyColumn(modifier = Modifier.heightIn(max = 480.dp)) {
+                    items(filtered, key = { it.packageName }) { app ->
+                        TextButton(
+                            onClick = { onSelect(app) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SensitiveAppIcon(app.packageName)
+                                Spacer(modifier = Modifier.size(8.dp))
+                                Column(horizontalAlignment = Alignment.Start) {
+                                    Text(app.label)
+                                    Text(app.packageName)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
+
+@Composable
+private fun SensitiveAppIcon(packageName: String) {
+    val context = LocalContext.current
+    var bitmap by remember(packageName) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    LaunchedEffect(packageName) {
+        bitmap = withContext(Dispatchers.IO) {
+            runCatching {
+                context.packageManager.getApplicationIcon(packageName).toBitmap(48, 48).asImageBitmap()
+            }.getOrNull()
+        }
+    }
+    val loadedBitmap = bitmap
+    if (loadedBitmap != null) {
+        Image(bitmap = loadedBitmap, contentDescription = null, modifier = Modifier.size(36.dp))
+    } else {
+        Spacer(modifier = Modifier.size(36.dp))
     }
 }
 

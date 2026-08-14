@@ -136,6 +136,37 @@ class LedgerDatabaseInstrumentedTest {
     }
 
     @Test
+    fun listenerConnectionClosesBootAndCallbackGapsButPreservesHistory() {
+        val dao = db.coverageGapDao()
+        listOf(
+            GapDetectors.BOOT_CHECK,
+            GapDetectors.LISTENER_CALLBACK,
+            GapDetectors.HEALTH_CHECK,
+        ).forEachIndexed { index, detector ->
+            dao.insert(
+                CoverageGapEntity(
+                    detector = detector,
+                    startedAtMs = 1000L + index,
+                    endedAtMs = null,
+                    state = GapState.ACTIVE,
+                    note = "test",
+                )
+            )
+        }
+
+        NotificationListenerRecoveryPolicy.detectorsClosedOnConnection.forEach { detector ->
+            dao.closeOpenByDetector(detector, 2000L)
+        }
+
+        assertEquals(1L, dao.countOpen())
+        assertEquals(GapDetectors.HEALTH_CHECK, dao.openGaps().single().detector)
+        db.openHelper.readableDatabase.query("SELECT COUNT(*) FROM coverage_gap").use {
+            assertTrue(it.moveToFirst())
+            assertEquals(3, it.getInt(0))
+        }
+    }
+
+    @Test
     fun legacyOpenGapStateIsNormalizedWithoutDeletingRows() {
         db.openHelper.writableDatabase.execSQL(
             "INSERT INTO coverage_gap(detector, started_at_ms, ended_at_ms, state, note) VALUES('legacy-active', 1000, NULL, 'OPEN', NULL)"
