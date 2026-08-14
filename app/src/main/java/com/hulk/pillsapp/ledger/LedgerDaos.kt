@@ -288,6 +288,12 @@ abstract class CanonicalDao {
     abstract fun countEvidenceForObservation(observationId: Long): Long
 }
 
+data class BehaviorDashboardSnapshot(
+    val candidates: List<BehaviorCandidateEntity>,
+    val pendingCount: Long,
+    val autoRecordedCount: Long,
+)
+
 @Dao
 abstract class BehaviorDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
@@ -345,11 +351,27 @@ abstract class BehaviorDao {
     ): Int
 
     @Query(
-        "SELECT * FROM behavior_candidate ORDER BY " +
-            "CASE state WHEN 'PENDING' THEN 0 WHEN 'AUTO_RECORDED' THEN 1 ELSE 2 END, " +
-            "occurred_at_ms DESC LIMIT :limit"
+        "SELECT * FROM behavior_candidate WHERE state IN ('PENDING', 'AUTO_RECORDED') ORDER BY " +
+            "CASE state WHEN 'PENDING' THEN 0 ELSE 1 END, occurred_at_ms DESC, id DESC LIMIT :limit"
     )
-    abstract fun listRecent(limit: Int = 80): List<BehaviorCandidateEntity>
+    abstract fun listActionable(limit: Int): List<BehaviorCandidateEntity>
+
+    @Query(
+        "SELECT * FROM behavior_candidate WHERE state NOT IN ('PENDING', 'AUTO_RECORDED') " +
+            "ORDER BY occurred_at_ms DESC, id DESC LIMIT :limit"
+    )
+    abstract fun listRecentResolved(limit: Int = 20): List<BehaviorCandidateEntity>
+
+    /** 同一读事务内生成首页快照，避免状态转换恰好跨两次查询时重复展示。 */
+    @Transaction
+    open fun dashboardSnapshot(
+        actionableLimit: Int = 10,
+        resolvedLimit: Int = 20,
+    ): BehaviorDashboardSnapshot = BehaviorDashboardSnapshot(
+        candidates = listActionable(actionableLimit) + listRecentResolved(resolvedLimit),
+        pendingCount = countByState(BehaviorCandidateState.PENDING),
+        autoRecordedCount = countByState(BehaviorCandidateState.AUTO_RECORDED),
+    )
 
     @Query("SELECT COUNT(*) FROM behavior_candidate WHERE state = :state")
     abstract fun countByState(state: BehaviorCandidateState): Long

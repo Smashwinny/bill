@@ -147,6 +147,7 @@ object LedgerKernel {
         Thread(runnable, "system-callback-ingest")
     }
     private val observationRetryScheduled = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val behaviorDashboardActionableLimit = java.util.concurrent.atomic.AtomicInteger(10)
 
     @Volatile
     private var appContext: Context? = null
@@ -1300,6 +1301,25 @@ object LedgerKernel {
         submitAsync { refreshStatusBlocking() }
     }
 
+    fun showMoreBehaviorCandidates() {
+        behaviorDashboardActionableLimit.updateAndGet { current ->
+            if (current > Int.MAX_VALUE - 10) Int.MAX_VALUE else current + 10
+        }
+        refreshStatusAsync()
+    }
+
+    fun showAllBehaviorCandidates() {
+        submitAsync {
+            val db = requireDb()
+            val total = db.behaviorDao().countByState(BehaviorCandidateState.PENDING) +
+                db.behaviorDao().countByState(BehaviorCandidateState.AUTO_RECORDED)
+            behaviorDashboardActionableLimit.set(
+                maxOf(10L, total).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            )
+            refreshStatusBlocking()
+        }
+    }
+
     private fun refreshStatusBlocking() {
         val context = appContext ?: return
         val prefs = context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -1308,6 +1328,9 @@ object LedgerKernel {
         val sourceCoverage = SourceCoverageAudit.build(
             db.observationDao().sourceCoverageSummaries(),
             statementImports,
+        )
+        val behaviorDashboard = db.behaviorDao().dashboardSnapshot(
+            actionableLimit = behaviorDashboardActionableLimit.get(),
         )
         val snapshot = KernelStatus(
             observationCount = db.observationDao().countAll(),
@@ -1353,16 +1376,16 @@ object LedgerKernel {
             statementIncompleteImportCount = db.statementDao().countIncompleteImports(),
             statementIntegrityFailureCount = db.statementDao().countCompletedIntegrityFailures(),
             orphanStatementLinkCount = db.statementDao().countOrphanLinks(),
-            behaviorPendingCount = db.behaviorDao().countByState(BehaviorCandidateState.PENDING),
+            behaviorPendingCount = behaviorDashboard.pendingCount,
             behaviorConfirmedCount = db.behaviorDao().countByState(BehaviorCandidateState.CONFIRMED),
-            behaviorAutoRecordedCount = db.behaviorDao().countByState(BehaviorCandidateState.AUTO_RECORDED),
+            behaviorAutoRecordedCount = behaviorDashboard.autoRecordedCount,
             behaviorAutoTemplateCount = db.behaviorDao().countAutoTemplates(),
             behaviorDecisionCount = db.behaviorDao().countDecisions(),
             behaviorSignalReceiptCount = db.behaviorDao().countSignalReceipts(),
             orphanBehaviorSignalReceiptCount = db.behaviorDao().countOrphanSignalReceipts(),
             orphanBehaviorCount = db.behaviorDao().countOrphans(),
             a11yHeartbeatFresh = isA11yHeartbeatFresh(),
-            behaviorCandidates = db.behaviorDao().listRecent(),
+            behaviorCandidates = behaviorDashboard.candidates,
             sourceCoverage = sourceCoverage,
             statementImports = statementImports,
             debtAccounts = db.debtAccountDao().listVisible(),

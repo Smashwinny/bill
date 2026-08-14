@@ -48,6 +48,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -298,174 +299,198 @@ private fun AppHome(
     var packageHint by remember { mutableStateOf<String?>(null) }
     var reportExportPath by remember { mutableStateOf<String?>(null) }
     var reportText by remember { mutableStateOf("") }
+    var showDeveloperTools by rememberSaveable { mutableStateOf(false) }
+    val scrollState = rememberScrollState()
 
     LaunchedEffect(Unit) { onRefresh() }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.Top,
-        horizontalAlignment = Alignment.Start,
-    ) {
-        AppHomeHeaderSection(state)
-        BehaviorLearningSection(
-            refreshTick = refreshTick,
-            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-            onRequestNotificationPermission = onRequestNotificationPermission,
-            onSafeLaunchSensitive = onSafeLaunchSensitive,
-            onOpenUsageAccessSettings = onOpenUsageAccessSettings,
-            onRestoreSensitiveMode = onRestoreSensitiveMode,
-            onRefresh = onRefresh,
-        )
-        KernelStatusSection()
-        M2ChannelSection(
-            refreshTick = refreshTick,
-            onRequestSmsPermissions = onRequestSmsPermissions,
-            onOpenAutostartSettings = onOpenAutostartSettings,
-            onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
-        )
-        DebtDiscoverySection()
-        SourceCoverageAndImportSection(onSelectStatementFile)
-
-        Spacer(modifier = Modifier.height(20.dp))
-        ProbeConfigurationSection(
-            activeProbeSession = activeProbeSession,
-            channelName = channelName,
-            packageInput = packageInput,
-            packageInputError = packageInputError,
-            packageHint = packageHint,
-            scenario = scenario,
-            action = action,
-            onChannelNameChange = { channelName = it },
-            onPackageInputChange = {
-                packageInput = it
-                val trimmed = it.trim()
-                packageInputError = if (trimmed.isNotBlank() && !isValidAndroidPackageName(trimmed)) {
-                    context.getString(R.string.package_name_format_error)
-                } else {
-                    null
-                }
-                packageHint = if (packageInputError == null) packageAvailabilityHint(context, trimmed) else null
-            },
-            onPreset = { presetChannel, presetPackage ->
-                channelName = presetChannel
-                packageInput = presetPackage
-                packageInputError = null
-                packageHint = packageAvailabilityHint(context, packageInput)
-            },
-            onScenarioChange = { scenario = it },
-            onActionChange = { action = it },
-            onOpenNotificationPermissionPage = onOpenNotificationAccessPage,
-            onStartProbeSession = {
-                val trimmedPackage = packageInput.trim()
-                if (trimmedPackage.isBlank() || !isValidAndroidPackageName(trimmedPackage)) {
-                    packageInputError = if (trimmedPackage.isBlank()) {
-                        context.getString(R.string.package_name_required_error)
-                    } else {
-                        context.getString(R.string.package_name_format_error)
-                    }
-                } else {
-                    val trimmedChannel = channelName.trim().ifBlank { trimmedPackage }
-                    val started = ProbeSessionRepository.startSession(
-                        channelName = trimmedChannel,
-                        packageName = trimmedPackage,
-                        scenario = scenario,
-                        action = action,
-                    )
-                    if (started) {
-                        NotificationEventRepository.addEnabledPackage(context, trimmedPackage)
-                    }
-                }
-            },
-            onEndProbeSession = {
-                val result = ProbeSessionRepository.endSession()
-                if (result == null) return@ProbeConfigurationSection
-                val bundle = ProbeSessionRepository.completedSessions.value
-                if (bundle.isNotEmpty()) {
-                    reportText = buildProbeReportText(
-                        ProbeReportBundle(
-                            sessions = bundle,
-                            appVersionName = BuildConfig.VERSION_NAME,
-                            appVersionCode = BuildConfig.VERSION_CODE,
-                        )
-                    )
-                }
-            },
-            needPermissionHint = { pkg ->
-                packageInput.isNotBlank() && !NotificationEventRepository.isPackageEnabled(context, pkg)
-            },
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-        ProbeReportSection(
-            probeSessions = probeSessions,
-            context = context,
-            reportText = reportText,
-            reportExportPath = reportExportPath,
-            onReportTextChange = { reportText = it },
-            onReportExportPathChange = { reportExportPath = it },
-            onRefresh = onRefresh,
-        )
-
-        Spacer(modifier = Modifier.height(20.dp))
-        ProbeWhitelistSection(
-            context = context,
-            enabledPackages = enabledPackages,
-            packageInput = packageInput,
-            packageInputError = packageInputError,
-            packageHint = packageHint,
-            onPackageInputChange = {
-                packageInput = it
-                val trimmed = it.trim()
-                packageInputError = if (trimmed.isNotEmpty() && !isValidAndroidPackageName(trimmed)) {
-                    context.getString(R.string.package_name_format_error)
-                } else {
-                    null
-                }
-                packageHint = if (packageInputError == null) packageAvailabilityHint(context, trimmed) else null
-            },
-            onAddPackage = {
-                val trimmed = packageInput.trim()
-                val canAdd = trimmed.isNotBlank() && isValidAndroidPackageName(trimmed)
-                if (!canAdd) {
-                    packageInputError = if (trimmed.isBlank()) {
-                        context.getString(R.string.package_name_required_error)
-                    } else {
-                        context.getString(R.string.package_name_format_error)
-                    }
-                    return@ProbeWhitelistSection
-                }
-                NotificationEventRepository.addEnabledPackage(context, trimmed)
-                packageInput = ""
-                packageHint = null
-                packageInputError = null
-            },
-        )
-
-        Spacer(modifier = Modifier.height(20.dp))
-        RawEventsSection(events = events)
-
-        Spacer(modifier = Modifier.height(16.dp))
-        Button(onClick = { showClearDialog = true }, modifier = Modifier.fillMaxWidth()) {
-            Text(stringResource(R.string.clear_test_data_label))
-        }
-        Spacer(modifier = Modifier.height(12.dp))
-        Text(stringResource(R.string.t03_privacy_notice))
-
-        if (showClearDialog) {
-            ClearDataDialog(
-                onDismiss = { showClearDialog = false },
-                onConfirm = {
-                    showClearDialog = false
-                    coroutineScope.launch {
-                        NotificationEventRepository.clearAll(context)
-                        ProbeSessionRepository.clearCompletedSessions()
-                        onRefresh()
-                    }
-                },
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(scrollState)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.Top,
+            horizontalAlignment = Alignment.Start,
+        ) {
+            AppHomeHeaderSection(state)
+            BehaviorLearningSection(
+                refreshTick = refreshTick,
+                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                onRequestNotificationPermission = onRequestNotificationPermission,
+                onSafeLaunchSensitive = onSafeLaunchSensitive,
+                onOpenUsageAccessSettings = onOpenUsageAccessSettings,
+                onRestoreSensitiveMode = onRestoreSensitiveMode,
+                onRefresh = onRefresh,
             )
+            KernelStatusSection()
+            M2ChannelSection(
+                refreshTick = refreshTick,
+                onRequestSmsPermissions = onRequestSmsPermissions,
+                onOpenAutostartSettings = onOpenAutostartSettings,
+                onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
+            )
+            DebtDiscoverySection()
+            SourceCoverageAndImportSection(onSelectStatementFile)
+
+            Spacer(modifier = Modifier.height(20.dp))
+            Button(
+                onClick = { showDeveloperTools = !showDeveloperTools },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (showDeveloperTools) "收起开发测试工具" else "展开开发测试工具")
+            }
+            Text("通知探针、原始事件和测试数据清理默认收起，不影响日常自动记账。")
+
+            if (showDeveloperTools) {
+                Spacer(modifier = Modifier.height(20.dp))
+                ProbeConfigurationSection(
+                    activeProbeSession = activeProbeSession,
+                    channelName = channelName,
+                    packageInput = packageInput,
+                    packageInputError = packageInputError,
+                    packageHint = packageHint,
+                    scenario = scenario,
+                    action = action,
+                    onChannelNameChange = { channelName = it },
+                    onPackageInputChange = {
+                        packageInput = it
+                        val trimmed = it.trim()
+                        packageInputError = if (trimmed.isNotBlank() && !isValidAndroidPackageName(trimmed)) {
+                            context.getString(R.string.package_name_format_error)
+                        } else {
+                            null
+                        }
+                        packageHint = if (packageInputError == null) packageAvailabilityHint(context, trimmed) else null
+                    },
+                    onPreset = { presetChannel, presetPackage ->
+                        channelName = presetChannel
+                        packageInput = presetPackage
+                        packageInputError = null
+                        packageHint = packageAvailabilityHint(context, packageInput)
+                    },
+                    onScenarioChange = { scenario = it },
+                    onActionChange = { action = it },
+                    onOpenNotificationPermissionPage = onOpenNotificationAccessPage,
+                    onStartProbeSession = {
+                        val trimmedPackage = packageInput.trim()
+                        if (trimmedPackage.isBlank() || !isValidAndroidPackageName(trimmedPackage)) {
+                            packageInputError = if (trimmedPackage.isBlank()) {
+                                context.getString(R.string.package_name_required_error)
+                            } else {
+                                context.getString(R.string.package_name_format_error)
+                            }
+                        } else {
+                            val trimmedChannel = channelName.trim().ifBlank { trimmedPackage }
+                            val started = ProbeSessionRepository.startSession(
+                                channelName = trimmedChannel,
+                                packageName = trimmedPackage,
+                                scenario = scenario,
+                                action = action,
+                            )
+                            if (started) {
+                                NotificationEventRepository.addEnabledPackage(context, trimmedPackage)
+                            }
+                        }
+                    },
+                    onEndProbeSession = {
+                        val result = ProbeSessionRepository.endSession()
+                        if (result == null) return@ProbeConfigurationSection
+                        val bundle = ProbeSessionRepository.completedSessions.value
+                        if (bundle.isNotEmpty()) {
+                            reportText = buildProbeReportText(
+                                ProbeReportBundle(
+                                    sessions = bundle,
+                                    appVersionName = BuildConfig.VERSION_NAME,
+                                    appVersionCode = BuildConfig.VERSION_CODE,
+                                )
+                            )
+                        }
+                    },
+                    needPermissionHint = { pkg ->
+                        packageInput.isNotBlank() && !NotificationEventRepository.isPackageEnabled(context, pkg)
+                    },
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+                ProbeReportSection(
+                    probeSessions = probeSessions,
+                    context = context,
+                    reportText = reportText,
+                    reportExportPath = reportExportPath,
+                    onReportTextChange = { reportText = it },
+                    onReportExportPathChange = { reportExportPath = it },
+                    onRefresh = onRefresh,
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+                ProbeWhitelistSection(
+                    context = context,
+                    enabledPackages = enabledPackages,
+                    packageInput = packageInput,
+                    packageInputError = packageInputError,
+                    packageHint = packageHint,
+                    onPackageInputChange = {
+                        packageInput = it
+                        val trimmed = it.trim()
+                        packageInputError = if (trimmed.isNotEmpty() && !isValidAndroidPackageName(trimmed)) {
+                            context.getString(R.string.package_name_format_error)
+                        } else {
+                            null
+                        }
+                        packageHint = if (packageInputError == null) packageAvailabilityHint(context, trimmed) else null
+                    },
+                    onAddPackage = {
+                        val trimmed = packageInput.trim()
+                        val canAdd = trimmed.isNotBlank() && isValidAndroidPackageName(trimmed)
+                        if (!canAdd) {
+                            packageInputError = if (trimmed.isBlank()) {
+                                context.getString(R.string.package_name_required_error)
+                            } else {
+                                context.getString(R.string.package_name_format_error)
+                            }
+                            return@ProbeWhitelistSection
+                        }
+                        NotificationEventRepository.addEnabledPackage(context, trimmed)
+                        packageInput = ""
+                        packageHint = null
+                        packageInputError = null
+                    },
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+                RawEventsSection(events = events)
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(onClick = { showClearDialog = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.clear_test_data_label))
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(stringResource(R.string.t03_privacy_notice))
+
+                if (showClearDialog) {
+                    ClearDataDialog(
+                        onDismiss = { showClearDialog = false },
+                        onConfirm = {
+                            showClearDialog = false
+                            coroutineScope.launch {
+                                NotificationEventRepository.clearAll(context)
+                                ProbeSessionRepository.clearCompletedSessions()
+                                onRefresh()
+                            }
+                        },
+                    )
+                }
+            }
+        }
+
+        if (scrollState.value > 240) {
+            Button(
+                onClick = { coroutineScope.launch { scrollState.animateScrollTo(0) } },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                Text("↑ 回到记账与敏感应用")
+            }
         }
     }
 }
@@ -787,6 +812,7 @@ private fun BehaviorLearningSection(
     val sensitiveModeActive = sensitiveSession != null
     var showSensitivePicker by remember { mutableStateOf(false) }
     var sensitivePickerSearch by remember { mutableStateOf("") }
+    var showResolvedHistory by rememberSaveable { mutableStateOf(false) }
     Spacer(modifier = Modifier.height(16.dp))
     Text(text = "行为学习记账（M5 第一版）")
     Text(
@@ -954,11 +980,60 @@ private fun BehaviorLearningSection(
         }
         Text(text = "测试候选默认只进入待确认，不会自行记成成功；其模板与真实 App 隔离。")
     }
+    val actionableCandidates = status.behaviorCandidates.filter {
+        it.state == BehaviorCandidateState.PENDING || it.state == BehaviorCandidateState.AUTO_RECORDED
+    }
+    val resolvedCandidates = status.behaviorCandidates.filterNot { it in actionableCandidates }
+    val totalActionableCount = status.behaviorPendingCount + status.behaviorAutoRecordedCount
     if (status.behaviorCandidates.isEmpty()) {
         Text(text = "尚无行为候选。开启服务后，明确成功终态会出现在这里。")
     } else {
-        status.behaviorCandidates.take(30).forEach { candidate ->
-            BehaviorCandidateCard(candidate)
+        Text("需要你处理（共 $totalActionableCount 条，已加载 ${actionableCandidates.size} 条）")
+        if (actionableCandidates.isEmpty()) {
+            Text("当前没有待确认或可撤销记录。")
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 600.dp),
+            ) {
+                items(actionableCandidates, key = { it.id }) { candidate ->
+                    BehaviorCandidateCard(candidate)
+                }
+            }
+        }
+        if (totalActionableCount > actionableCandidates.size) {
+            val remaining = totalActionableCount - actionableCandidates.size
+            Button(
+                onClick = { LedgerKernel.showMoreBehaviorCandidates() },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("再显示 10 条（剩余 $remaining 条）")
+            }
+            TextButton(
+                onClick = { LedgerKernel.showAllBehaviorCandidates() },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("展开全部待处理记录")
+            }
+        }
+        if (resolvedCandidates.isNotEmpty()) {
+            TextButton(onClick = { showResolvedHistory = !showResolvedHistory }) {
+                Text(
+                    if (showResolvedHistory) {
+                        "收起最近处理记录"
+                    } else {
+                        "展开最近处理记录（${resolvedCandidates.size} 条）"
+                    }
+                )
+            }
+            if (showResolvedHistory) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 600.dp),
+                ) {
+                    items(resolvedCandidates, key = { it.id }) { candidate ->
+                        BehaviorCandidateCard(candidate)
+                    }
+                }
+            }
         }
     }
 }

@@ -468,6 +468,106 @@ class LedgerDatabaseInstrumentedTest {
     }
 
     @Test
+    fun actionableBehaviorQueryDoesNotTruncateAndResolvedHistoryIsBounded() {
+        val now = 20_000L
+        db.behaviorDao().insertTemplateIgnore(
+            BehaviorTemplateEntity(
+                templateKey = "dashboard-template",
+                packageName = "com.example.dashboard",
+                kind = BehaviorKind.PAYMENT,
+                routeSignature = "dashboard-route",
+                appVersionCode = 1,
+                positiveCount = 0,
+                negativeCount = 0,
+                consecutivePositiveCount = 0,
+                autoEnabled = false,
+                createdAtMs = now,
+                updatedAtMs = now,
+            )
+        )
+
+        fun addCandidate(index: Int, state: BehaviorCandidateState) {
+            val sourceKey = "dashboard-$index"
+            val occurredAt = now + index
+            val observationId = db.observationDao().ingest(
+                observation("支付成功 10.00元", sourceKey).copy(
+                    source = ObservationSource.A11Y,
+                    sourceKey = sourceKey,
+                    capturePath = CapturePath.A11Y,
+                    parseState = ParseState.PARSED,
+                    postTimeMs = occurredAt,
+                    receivedAtMs = occurredAt,
+                    createdAtMs = occurredAt,
+                )
+            ).id
+            val canonicalId = db.canonicalDao().createCandidateWithEvidence(
+                CanonicalTransactionEntity(
+                    strongIdHash = null,
+                    type = TxType.PAYMENT,
+                    status = if (state == BehaviorCandidateState.CONFIRMED) {
+                        TxStatus.SUCCESS
+                    } else {
+                        TxStatus.DETECTED
+                    },
+                    amountCents = 1000,
+                    merchantHint = null,
+                    occurredAtMs = occurredAt,
+                    backfilledFrom = null,
+                    createdAtMs = occurredAt,
+                ),
+                observationId,
+                "A11Y_BEHAVIOR_CLIP",
+                occurredAt,
+            )
+            val inserted = db.behaviorDao().insertCandidateIgnore(
+                BehaviorCandidateEntity(
+                    publicId = sourceKey,
+                    observationId = observationId,
+                    canonicalTxId = canonicalId,
+                    templateKey = "dashboard-template",
+                    packageName = "com.example.dashboard",
+                    kind = BehaviorKind.PAYMENT,
+                    amountCents = 1000,
+                    occurredAtMs = occurredAt,
+                    confidence = 95,
+                    consumedIntent = true,
+                    routeSignature = "dashboard-route",
+                    appVersionCode = 1,
+                    ambiguousRepeatCount = 0,
+                    featureSummary = "safe",
+                    purpose = null,
+                    state = state,
+                    createdAtMs = occurredAt,
+                    updatedAtMs = occurredAt,
+                    decidedAtMs = occurredAt.takeIf { state == BehaviorCandidateState.CONFIRMED },
+                )
+            )
+            assertTrue(inserted > 0)
+        }
+
+        repeat(35) { addCandidate(it, BehaviorCandidateState.PENDING) }
+        repeat(3) { addCandidate(100 + it, BehaviorCandidateState.AUTO_RECORDED) }
+        repeat(25) { addCandidate(200 + it, BehaviorCandidateState.CONFIRMED) }
+
+        val firstPage = db.behaviorDao().listActionable(10)
+        val actionable = db.behaviorDao().listActionable(100)
+        val resolved = db.behaviorDao().listRecentResolved()
+        val dashboard = db.behaviorDao().dashboardSnapshot(actionableLimit = 100)
+        assertEquals(10, firstPage.size)
+        assertEquals(38, actionable.size)
+        assertEquals(35, actionable.count { it.state == BehaviorCandidateState.PENDING })
+        assertEquals(3, actionable.count { it.state == BehaviorCandidateState.AUTO_RECORDED })
+        assertEquals(BehaviorCandidateState.PENDING, actionable.first().state)
+        assertEquals(BehaviorCandidateState.AUTO_RECORDED, actionable.last().state)
+        assertEquals(20, resolved.size)
+        assertTrue(resolved.all { it.state == BehaviorCandidateState.CONFIRMED })
+        assertEquals("dashboard-224", resolved.first().publicId)
+        assertEquals(38L, dashboard.pendingCount + dashboard.autoRecordedCount)
+        assertEquals(58, dashboard.candidates.size)
+        assertEquals(58, dashboard.candidates.map { it.publicId }.toSet().size)
+    }
+
+    @Test
     fun behaviorOutboxIsEncryptedRoundTrippableAndRemovable() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val directory = java.io.File(context.cacheDir, "behavior-outbox-${java.util.UUID.randomUUID()}")
