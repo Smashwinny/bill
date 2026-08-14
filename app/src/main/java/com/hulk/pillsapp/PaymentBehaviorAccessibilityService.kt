@@ -14,6 +14,8 @@ import java.util.ArrayDeque
  * 事件驱动采集：不截图、不遍历节点树。页面原文只在本次回调内用于分类，随后即丢弃。
  */
 class PaymentBehaviorAccessibilityService : AccessibilityService() {
+    private var restoreAttemptAtCreate: String? = null
+    private var connectionAccepted = false
     private val heartbeatHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val heartbeat = object : Runnable {
         override fun run() {
@@ -21,7 +23,9 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
                 this@PaymentBehaviorAccessibilityService,
                 this@PaymentBehaviorAccessibilityService,
             )) {
-                CallbackOwnerAccess.RECOVERED -> LedgerKernel.markA11yConnected()
+                CallbackOwnerAccess.RECOVERED -> {
+                    LedgerKernel.markA11yConnected()
+                }
                 CallbackOwnerAccess.CURRENT -> LedgerKernel.markA11yHeartbeat()
                 CallbackOwnerAccess.STALE -> return
             }
@@ -31,8 +35,20 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
     private val window = ArrayDeque<BehaviorWindowFeature>()
     private val episodeTracker = BehaviorEpisodeTracker { "a11y-${java.util.UUID.randomUUID()}" }
 
+    override fun onCreate() {
+        super.onCreate()
+        // 固化 Service 实例所属的恢复尝试；后续重试不能被这个旧实例误确认。
+        restoreAttemptAtCreate = SensitiveAppMode.currentRestoreAttemptId(this)
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
+        if (!SensitiveAppMode.confirmServiceConnected(this, restoreAttemptAtCreate)) {
+            connectionAccepted = false
+            return
+        }
+        restoreAttemptAtCreate = null
+        connectionAccepted = true
         BehaviorAccessibilityState.registerCallbackOwner(this, this)
         LedgerKernel.markA11yConnected()
         heartbeatHandler.removeCallbacks(heartbeat)
@@ -40,17 +56,29 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (!connectionAccepted) return
         event ?: return
         // 包升级时旧 Service.onDestroy 可能晚于新实例的 onServiceConnected；
         // 事件可认领回调所有权，并只在真正恢复时关闭持久缺口。
         when (BehaviorAccessibilityState.claimCallbackOwner(this, this)) {
-            CallbackOwnerAccess.RECOVERED -> LedgerKernel.markA11yConnected()
+            CallbackOwnerAccess.RECOVERED -> {
+                LedgerKernel.markA11yConnected()
+            }
             CallbackOwnerAccess.CURRENT -> Unit
             CallbackOwnerAccess.STALE -> return
         }
         val packageName = event.packageName?.toString().orEmpty()
         if (packageName.isBlank() || packageName == applicationContext.packageName) return
         val now = System.currentTimeMillis()
+        if (SensitiveAppMode.isSensitivePackage(packageName)) {
+            // 直接启动银行时不读取事件文本；银行会将无障碍误报为录屏，引导下次安全重开。
+            window.clear()
+            episodeTracker.onContext(packageName, event.windowId, now)
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                SensitiveAppMode.notifyUnsafeCmbLaunch(this)
+            }
+            return
+        }
         prune(now)
         episodeTracker.onContext(packageName, event.windowId, now)
 
@@ -137,9 +165,13 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        connectionAccepted = false
         heartbeatHandler.removeCallbacks(heartbeat)
         if (BehaviorAccessibilityState.clearCallbackConnected(this, this)) {
-            LedgerKernel.markA11yDisconnected("行为学习无障碍服务已停止")
+            LedgerKernel.markA11yDisconnected(
+                SensitiveAppMode.activeDisconnectNote(this)
+                    ?: "行为学习无障碍服务已停止"
+            )
         }
         super.onDestroy()
     }

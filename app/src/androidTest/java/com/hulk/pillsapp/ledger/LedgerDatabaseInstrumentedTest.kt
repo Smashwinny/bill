@@ -77,6 +77,47 @@ class LedgerDatabaseInstrumentedTest {
     }
 
     @Test
+    fun durableCallbackReplayDoesNotInflateDuplicatesOrRollbackNewerRevision() {
+        val first = observation("支付处理中 10.00 元", "durable-old")
+        val inserted = db.observationDao().ingestDurableCallback(first)
+        db.observationDao().ingestDurableCallback(first)
+        assertEquals(0L, db.observationDao().findById(inserted.id)?.duplicateCount)
+
+        val newer = first.copy(
+            body = "支付成功 10.00 元",
+            contentHash = "durable-new",
+            receivedAtMs = first.receivedAtMs + 10,
+        )
+        db.observationDao().ingestDurableCallback(newer)
+        db.observationDao().ingestDurableCallback(first)
+        val current = db.observationDao().findById(inserted.id)
+        assertEquals("durable-new", current?.contentHash)
+        assertEquals(newer.body, current?.body)
+        assertEquals(0L, current?.duplicateCount)
+    }
+
+    @Test
+    fun delayedReconnectSweepCannotRollbackNewerLiveSuccess() {
+        val delayedSweep = observation("支付处理中 10.00 元", "sweep-old").copy(
+            capturePath = CapturePath.RECONNECT_SWEEP,
+            receivedAtMs = 2000,
+        )
+        val newerLive = observation("支付成功 10.00 元", "live-success").copy(
+            capturePath = CapturePath.LIVE_CALLBACK,
+            receivedAtMs = 2001,
+        )
+        val live = db.observationDao().ingestDurableCallback(newerLive)
+        val old = db.observationDao().ingestDurableCallback(delayedSweep)
+
+        assertTrue(live is IngestOutcome.New)
+        assertTrue(old is IngestOutcome.Duplicate)
+        val current = db.observationDao().findById(live.id)
+        assertEquals("live-success", current?.contentHash)
+        assertEquals(newerLive.body, current?.body)
+        assertEquals(1L, db.observationDao().countRevisions(live.id))
+    }
+
+    @Test
     fun closingGapRemovesItFromActiveCountButPreservesHistory() {
         val dao = db.coverageGapDao()
         dao.insert(
@@ -419,6 +460,22 @@ class LedgerDatabaseInstrumentedTest {
         assertFalse(file.readBytes().toString(Charsets.UTF_8).contains("outbox-clip"))
         assertEquals(signal, outbox.pending().single().signal)
         outbox.complete(file)
+        assertTrue(outbox.pending().isEmpty())
+        directory.delete()
+    }
+
+    @Test
+    fun observationOutboxIsEncryptedRoundTrippableAndRemovable() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val directory = java.io.File(context.cacheDir, "observation-outbox-${java.util.UUID.randomUUID()}")
+        val outbox = ObservationOutbox(directory)
+        val observation = observation("支付成功 88.88 元", "outbox-observation-hash")
+        val file = outbox.stage(observation)
+        assertTrue(outbox.hasPending())
+        assertFalse(file.readBytes().toString(Charsets.UTF_8).contains("支付成功"))
+        assertEquals(observation, outbox.pending().single().observation)
+        outbox.complete(file)
+        assertFalse(outbox.hasPending())
         assertTrue(outbox.pending().isEmpty())
         directory.delete()
     }

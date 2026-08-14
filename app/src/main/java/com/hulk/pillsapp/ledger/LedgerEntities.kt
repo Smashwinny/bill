@@ -78,6 +78,8 @@ object GapDetectors {
     const val HEALTH_CHECK = "HEALTH_CHECK"
     const val A11Y_SERVICE = "A11Y_SERVICE"
     const val A11Y_AMBIGUOUS_REPEAT = "A11Y_AMBIGUOUS_REPEAT"
+    const val CALLBACK_PERSISTENCE = "CALLBACK_PERSISTENCE"
+    const val CALLBACK_OUTBOX = "CALLBACK_OUTBOX"
 }
 
 @Entity(

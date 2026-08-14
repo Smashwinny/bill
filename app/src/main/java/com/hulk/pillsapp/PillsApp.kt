@@ -9,6 +9,10 @@ class PillsApp : Application() {
     override fun onCreate() {
         super.onCreate()
         LedgerKernel.init(this)
+        // 异常退出/进程重建时，到期会话只提醒确认；银行仍在前台时不能盲目恢复。
+        SensitiveAppMode.restoreIfExpired(this)
+        // 通知/SMS 回调已 fsync 但尚未来得及入库的加密待办在启动时幂等重放。
+        LedgerKernel.drainObservationOutbox()
         // M5：无障碍回调已 fsync 但尚未来得及入库的脱敏片段在启动时幂等重放。
         LedgerKernel.drainBehaviorOutbox()
         LedgerKernel.runLegacyMigrationIfNeeded(this)

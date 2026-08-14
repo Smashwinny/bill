@@ -19,10 +19,11 @@ class NotificationListenerService : AndroidNotificationListenerService() {
     private val processingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onListenerConnected() {
+        val connectedAtMs = System.currentTimeMillis()
         super.onListenerConnected()
         NotificationListenerState.setConnected()
-        // 恢复连接：关闭缺口结束时间（缺口记录保留），随后全量补偿扫描。
-        LedgerKernel.closeOpenGaps(GapDetectors.LISTENER_CALLBACK)
+        // 生命周期回调不等待共享队列；关闭缺口与补偿扫描按同一执行器顺序入队。
+        LedgerKernel.closeOpenGapsAsync(GapDetectors.LISTENER_CALLBACK, connectedAtMs)
         LedgerKernel.sweepActiveNotifications(activeNotifications?.toList().orEmpty())
     }
 
@@ -50,9 +51,14 @@ class NotificationListenerService : AndroidNotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
+        val disconnectedAtMs = System.currentTimeMillis()
         super.onListenerDisconnected()
         NotificationListenerState.setDisconnected()
-        LedgerKernel.openGap(GapDetectors.LISTENER_CALLBACK, "onListenerDisconnected")
+        LedgerKernel.openGapAsync(
+            GapDetectors.LISTENER_CALLBACK,
+            "onListenerDisconnected",
+            disconnectedAtMs,
+        )
     }
 
     override fun onDestroy() {

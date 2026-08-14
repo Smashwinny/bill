@@ -15,6 +15,10 @@
     <!-- HyperOS 保活引导：请求加入电池优化白名单 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 个人侧载版 M5.2：ADB 一次授权后，安全模式只增删本 App 的无障碍组件。 -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
 
     <application
         android:name=".PillsApp"
@@ -30,6 +34,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".SensitiveAppLaunchActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <service
             android:name=".NotificationListenerService"
             android:exported="false"
@@ -53,6 +62,9 @@
         </service>
         <receiver
             android:name=".ledger.BehaviorCandidateActionReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".SensitiveModeRestoreReceiver"
             android:exported="false" />
         <receiver
             android:name=".ledger.BootReceiver"

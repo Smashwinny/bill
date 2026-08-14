@@ -69,6 +69,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.math.BigDecimal
 import java.math.RoundingMode
+import kotlin.concurrent.thread
 
 private val eventTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
@@ -160,6 +161,15 @@ class MainActivity : ComponentActivity() {
                                 refreshState(this@MainActivity)
                             }
                         },
+                        onSafeLaunchCmb = {
+                            startActivity(Intent(this@MainActivity, SensitiveAppLaunchActivity::class.java))
+                        },
+                        onRestoreSensitiveMode = {
+                            thread(name = "sensitive-mode-manual-restore") {
+                                SensitiveAppMode.restore(this@MainActivity)
+                                runOnUiThread { refreshState(this@MainActivity) }
+                            }
+                        },
                         onOpenNotificationAccessPage = {
                             val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
                             permissionLauncher.launch(intent)
@@ -246,6 +256,8 @@ private fun AppHome(
     refreshTick: Int,
     onOpenAccessibilitySettings: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
+    onSafeLaunchCmb: () -> Unit,
+    onRestoreSensitiveMode: () -> Unit,
     onOpenNotificationAccessPage: () -> Unit,
     onRequestSmsPermissions: () -> Unit,
     onOpenAutostartSettings: () -> Unit,
@@ -286,6 +298,8 @@ private fun AppHome(
             refreshTick = refreshTick,
             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
             onRequestNotificationPermission = onRequestNotificationPermission,
+            onSafeLaunchCmb = onSafeLaunchCmb,
+            onRestoreSensitiveMode = onRestoreSensitiveMode,
         )
         KernelStatusSection()
         M2ChannelSection(
@@ -705,17 +719,25 @@ private fun BehaviorLearningSection(
     refreshTick: Int,
     onOpenAccessibilitySettings: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
+    onSafeLaunchCmb: () -> Unit,
+    onRestoreSensitiveMode: () -> Unit,
 ) {
     val context = LocalContext.current
     val accessibility by BehaviorAccessibilityState.state.collectAsState()
     val status by LedgerKernel.status.collectAsState()
     val notificationGranted = remember(refreshTick) {
-        android.os.Build.VERSION.SDK_INT < 33 ||
-            androidx.core.content.ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED
+        SensitiveModeNotifier.canNotify(context)
     }
+    val sensitiveControlGranted = remember(refreshTick) {
+        SensitiveAppMode.hasControlPermission(context)
+    }
+    val cmbInstalled = remember(refreshTick) {
+        SensitiveAppMode.isTargetInstalled(context)
+    }
+    val sensitiveSession = remember(refreshTick) {
+        SensitiveAppMode.currentSession(context)
+    }
+    val sensitiveModeActive = sensitiveSession != null
     Spacer(modifier = Modifier.height(16.dp))
     Text(text = "行为学习记账（M5 第一版）")
     Text(
@@ -727,7 +749,39 @@ private fun BehaviorLearningSection(
             "确认通知：${if (notificationGranted) "可发送" else "未授权"}"
     )
     Text(text = "只保留 10 秒内存事件滑窗，不截图、不保存页面原文。连续 5 次确认且零否定的同类行为才允许自动记账。")
-    if (!accessibility.permissionEnabled) {
+    Text(
+        text = when {
+            sensitiveSession?.phase == SensitiveLaunchPhase.RECOVERING ->
+                "招商银行安全模式：系统设置已写回，正在等待行为监视真正连接"
+            sensitiveModeActive -> "招商银行安全模式：行为监视已真正暂停；返回后恢复，15 分钟仅提醒确认"
+            sensitiveControlGranted -> "招商银行安全模式：已获得个人设备控制权限"
+            else -> "招商银行安全模式：待 ADB 授权，未授权时不会冒险启动银行"
+        }
+    )
+    if (cmbInstalled) {
+        Button(
+            onClick = onSafeLaunchCmb,
+            enabled = sensitiveControlGranted && notificationGranted && !sensitiveModeActive,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("安全打开招商银行")
+        }
+    }
+    if (sensitiveModeActive) {
+        Button(
+            onClick = onRestoreSensitiveMode,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                if (sensitiveSession?.phase == SensitiveLaunchPhase.RECOVERING) {
+                    "重试恢复监视"
+                } else {
+                    "已离开银行，立即恢复监视"
+                }
+            )
+        }
+    }
+    if (!accessibility.permissionEnabled && !sensitiveModeActive) {
         Button(onClick = onOpenAccessibilitySettings, modifier = Modifier.fillMaxWidth()) {
             Text("开启行为学习无障碍服务")
         }

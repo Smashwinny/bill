@@ -62,6 +62,28 @@ data class KernelStatus(
 )
 
 /**
+ * 耐久回调的不可交换顺序：数据库提交后必须先安排幂等解析，再删除 outbox。
+ * 即使删除或目录 fsync 失败，当前进程也已有解析任务，重放仍可安全重复安排。
+ */
+internal object DurableObservationCommitOrder {
+    fun commit(
+        ingest: () -> IngestOutcome,
+        scheduleProcessing: (IngestOutcome) -> Unit,
+        completeOutbox: () -> Unit,
+    ): IngestOutcome {
+        val outcome = ingest()
+        scheduleProcessing(outcome)
+        completeOutbox()
+        return outcome
+    }
+}
+
+internal object ObservationRecoveryRules {
+    fun isComplete(hasPendingOutbox: Boolean, pendingParseCount: Long): Boolean =
+        !hasPendingOutbox && pendingParseCount == 0L
+}
+
+/**
  * V1.1 §4 写入管线的实现。
  *
  * 崩溃安全模型：所有系统回调（通知/缺口）都通过 [runSync] 在调用线程上**同步等待**
@@ -85,6 +107,10 @@ object LedgerKernel {
     private val behaviorExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "behavior-ingest")
     }
+    private val callbackExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "system-callback-ingest")
+    }
+    private val observationRetryScheduled = java.util.concurrent.atomic.AtomicBoolean(false)
 
     @Volatile
     private var appContext: Context? = null
@@ -96,7 +122,16 @@ object LedgerKernel {
     private var behaviorOutbox: BehaviorSignalOutbox? = null
 
     @Volatile
+    private var observationOutbox: ObservationOutbox? = null
+
+    @Volatile
     private var executorThread: Thread? = null
+
+    @Volatile
+    private var callbackExecutorThread: Thread? = null
+
+    private val callbackTimestampLock = Any()
+    private var callbackTimestampFloor = 0L
 
     private val _status = MutableStateFlow(KernelStatus())
     val status: StateFlow<KernelStatus> = _status.asStateFlow()
@@ -107,6 +142,9 @@ object LedgerKernel {
         appContext = context.applicationContext
         behaviorOutbox = BehaviorSignalOutbox(
             java.io.File(context.applicationContext.filesDir, "behavior_signal_outbox")
+        )
+        observationOutbox = ObservationOutbox(
+            java.io.File(context.applicationContext.filesDir, "observation_outbox")
         )
         net.sqlcipher.database.SQLiteDatabase.loadLibs(context.applicationContext)
         val passphrase = DbCrypto.getOrCreatePassphrase(context)
@@ -119,6 +157,14 @@ object LedgerKernel {
             .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
             .build()
         executor.submit { executorThread = Thread.currentThread() }.get(2, TimeUnit.SECONDS)
+        callbackExecutor.submit { callbackExecutorThread = Thread.currentThread() }.get(2, TimeUnit.SECONDS)
+        val databaseTimestampFloor = callbackExecutor.submit<Long> {
+            requireDb().observationDao().maxReceivedAtMs()
+        }.get(2, TimeUnit.SECONDS)
+        val pendingTimestampFloor = runCatching {
+            requireNotNull(observationOutbox).pending().maxOfOrNull { it.observation.receivedAtMs } ?: 0L
+        }.onFailure(::recordAsyncFailure).getOrDefault(0L)
+        callbackTimestampFloor = maxOf(databaseTimestampFloor, pendingTimestampFloor)
         runSync { requireDb().coverageGapDao().normalizeLegacyOpenState() }
     }
 
@@ -250,6 +296,14 @@ object LedgerKernel {
             executor.submit<T> { block() }.get(3, TimeUnit.SECONDS)
         }
 
+    /** 通知/SMS 原始观察的高优先级短事务，不排在解析、迁移或状态刷新长队列之后。 */
+    private fun <T> runCallbackSync(block: () -> T): T =
+        if (Thread.currentThread() === callbackExecutorThread) {
+            block()
+        } else {
+            callbackExecutor.submit<T> { block() }.get(3, TimeUnit.SECONDS)
+        }
+
     private fun submitAsync(block: () -> Unit) {
         executor.submit {
             try {
@@ -312,7 +366,79 @@ object LedgerKernel {
     }
 
     fun ingestObservation(entity: RawObservationEntity) {
-        val outcome = runSync { requireDb().observationDao().ingest(entity) }
+        val durableEntity = normalizeCallbackTimestamp(entity)
+        val outbox = requireNotNull(observationOutbox)
+        val staged = runCatching { outbox.stage(durableEntity) }
+            .onFailure {
+                recordAsyncFailure(it)
+                openGapAsync(
+                    GapDetectors.CALLBACK_PERSISTENCE,
+                    "通知/SMS 加密待办不可用：本次回调改走数据库直写，覆盖需权威对账",
+                )
+            }
+            .getOrNull()
+        val future = callbackExecutor.submit {
+            try {
+                if (staged != null) {
+                    processStagedObservation(staged, durableEntity)
+                } else {
+                    val outcome = requireDb().observationDao().ingest(durableEntity)
+                    scheduleObservationProcessing(outcome)
+                }
+            } catch (failure: Throwable) {
+                recordAsyncFailure(failure)
+                if (staged != null) {
+                    openGapAsync(
+                        GapDetectors.CALLBACK_OUTBOX,
+                        "通知/SMS 加密待办入库延迟，后台持续重试并等待权威对账",
+                    )
+                    schedulePendingObservationRecovery()
+                    scheduleObservationOutboxRetry()
+                } else {
+                    openGapAsync(
+                        GapDetectors.CALLBACK_PERSISTENCE,
+                        "通知/SMS 待办与数据库直写均失败，需权威对账",
+                    )
+                }
+            }
+        }
+        try {
+            future.get(3, TimeUnit.SECONDS)
+        } catch (_: java.util.concurrent.TimeoutException) {
+            // 文件已 fsync，任务继续运行；系统回调可以安全返回，不崩溃也不丢观察。
+        } catch (failure: Throwable) {
+            // Callable 自身也捕获失败；这里仅防提交器级异常，绝不向系统回调逸出。
+            recordAsyncFailure(failure)
+            if (staged != null) scheduleObservationOutboxRetry()
+        }
+    }
+
+    private fun normalizeCallbackTimestamp(entity: RawObservationEntity): RawObservationEntity =
+        synchronized(callbackTimestampLock) {
+            val normalized = maxOf(entity.receivedAtMs, callbackTimestampFloor + 1L)
+            callbackTimestampFloor = normalized
+            entity.copy(
+                receivedAtMs = normalized,
+                createdAtMs = if (entity.createdAtMs == entity.receivedAtMs) {
+                    normalized
+                } else {
+                    entity.createdAtMs
+                },
+            )
+        }
+
+    private fun processStagedObservation(
+        staged: java.io.File,
+        entity: RawObservationEntity,
+    ): IngestOutcome {
+        return DurableObservationCommitOrder.commit(
+            ingest = { requireDb().observationDao().ingestDurableCallback(entity) },
+            scheduleProcessing = { scheduleDurableObservationProcessing(it.id) },
+            completeOutbox = { requireNotNull(observationOutbox).complete(staged) },
+        )
+    }
+
+    private fun scheduleObservationProcessing(outcome: IngestOutcome) {
         when (outcome) {
             is IngestOutcome.Duplicate -> Unit // 重复投递不触发重新解析
             is IngestOutcome.New,
@@ -326,16 +452,103 @@ object LedgerKernel {
     }
 
     /**
+     * outbox 重放得到 Duplicate 也可能是“DB 已提交、解析任务尚未安排”的崩溃残留，
+     * 因而必须按 observation id 幂等推进，不能把 Duplicate 直接丢弃。
+     */
+    private fun scheduleDurableObservationProcessing(observationId: Long) {
+        if (observationId < 0L) return
+        submitAsync {
+            CandidatePromoter.process(requireDb(), observationId)
+            DebtAccountDiscoverer.processPendingForObservation(requireDb(), observationId, ::accountHash)
+            refreshStatusBlocking()
+        }
+    }
+
+    fun drainObservationOutbox() {
+        callbackExecutor.submit {
+            try {
+                val pendingOutbox = requireNotNull(observationOutbox).pending()
+                val pendingParseCount = requireDb().observationDao().countPendingParse()
+                if (!ObservationRecoveryRules.isComplete(
+                        hasPendingOutbox = pendingOutbox.isNotEmpty(),
+                        pendingParseCount = pendingParseCount,
+                    )
+                ) {
+                    openGapAsync(
+                        GapDetectors.CALLBACK_OUTBOX,
+                        "通知/SMS 加密待办或数据库待解析观察仍未完成",
+                    )
+                }
+                pendingOutbox.forEach { pending ->
+                    processStagedObservation(pending.file, pending.observation)
+                }
+                schedulePendingObservationRecovery()
+            } catch (failure: Throwable) {
+                recordAsyncFailure(failure)
+                openGapAsync(
+                    GapDetectors.CALLBACK_OUTBOX,
+                    "通知/SMS 持久待办恢复失败，等待下次启动并需权威对账",
+                )
+                schedulePendingObservationRecovery()
+                scheduleObservationOutboxRetry()
+            }
+        }
+    }
+
+    /** outbox 与数据库 PENDING_PARSE 同时清空后才能关闭耐久回放缺口。 */
+    private fun schedulePendingObservationRecovery() {
+        submitAsync {
+            val dao = requireDb().observationDao()
+            while (true) {
+                val batch = dao.pendingParse(100)
+                if (batch.isEmpty()) break
+                batch.forEach {
+                    CandidatePromoter.process(requireDb(), it.id)
+                    DebtAccountDiscoverer.processPendingForObservation(requireDb(), it.id, ::accountHash)
+                }
+            }
+            val fullyRecovered = ObservationRecoveryRules.isComplete(
+                hasPendingOutbox = requireNotNull(observationOutbox).hasPending(),
+                pendingParseCount = dao.countPendingParse(),
+            )
+            if (fullyRecovered) {
+                requireDb().coverageGapDao().closeOpenByDetector(
+                    GapDetectors.CALLBACK_OUTBOX,
+                    System.currentTimeMillis(),
+                )
+            }
+            refreshStatusBlocking()
+        }
+    }
+
+    private fun scheduleObservationOutboxRetry() {
+        if (!observationRetryScheduled.compareAndSet(false, true)) return
+        callbackExecutor.schedule(
+            {
+                observationRetryScheduled.set(false)
+                drainObservationOutbox()
+            },
+            30L,
+            TimeUnit.SECONDS,
+        )
+    }
+
+    /**
      * 重连补偿扫描（V1.1 §3.1.2）：断连期间仍存活在通知栏的事件全部比对补录。
      * 幂等性由 (source, source_key) 唯一约束保证；进程中途被杀时下次重连会再次全量扫描。
      */
     fun sweepActiveNotifications(active: List<StatusBarNotification>) {
+        // 快照在系统回调线程当场映射并分配严格单调时间；后到的 LIVE_CALLBACK 必然更新。
+        val snapshotAtMs = System.currentTimeMillis()
+        val snapshot = active.map { sbn ->
+            normalizeCallbackTimestamp(
+                mapNotification(sbn, CapturePath.RECONNECT_SWEEP, snapshotAtMs)
+            )
+        }
         submitAsync {
-            val now = System.currentTimeMillis()
             val dao = requireDb().observationDao()
-            active.forEach { sbn ->
-                val entity = mapNotification(sbn, CapturePath.RECONNECT_SWEEP, now)
-                when (val outcome = dao.ingest(entity)) {
+            snapshot.forEach { entity ->
+                when (val outcome = dao.ingestDurableCallback(entity)) {
                     is IngestOutcome.Duplicate -> Unit
                     is IngestOutcome.New,
                     is IngestOutcome.Revised,
@@ -346,7 +559,7 @@ object LedgerKernel {
                 }
             }
             appContext?.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                ?.edit()?.putLong(PREF_LAST_SWEEP_AT, now)?.apply()
+                ?.edit()?.putLong(PREF_LAST_SWEEP_AT, snapshotAtMs)?.apply()
             refreshStatusBlocking()
         }
     }
@@ -388,9 +601,71 @@ object LedgerKernel {
         submitAsync { refreshStatusBlocking() }
     }
 
+    /** 系统生命周期回调专用：按序入队，避免主线程因共享写入队列繁忙而超时崩溃。 */
+    fun openGapAsync(
+        detector: String,
+        note: String?,
+        startedAtMs: Long = System.currentTimeMillis(),
+    ) {
+        submitAsync {
+            val dao = requireDb().coverageGapDao()
+            if (dao.countOpenByDetector(detector) == 0L) {
+                dao.insert(
+                    CoverageGapEntity(
+                        detector = detector,
+                        startedAtMs = startedAtMs,
+                        endedAtMs = null,
+                        state = GapState.ACTIVE,
+                        note = note,
+                    )
+                )
+            }
+            refreshStatusBlocking()
+        }
+    }
+
     /** 恢复连接将活动缺口转为 CLOSED；历史保留，待权威对账补齐后再转 BACKFILLED。 */
     fun closeOpenGaps(detector: String) {
         runSync { requireDb().coverageGapDao().closeOpenByDetector(detector, System.currentTimeMillis()) }
+        submitAsync { refreshStatusBlocking() }
+    }
+
+    fun closeOpenGapsAsync(
+        detector: String,
+        endedAtMs: Long = System.currentTimeMillis(),
+    ) {
+        submitAsync {
+            requireDb().coverageGapDao().closeOpenByDetector(detector, endedAtMs)
+            refreshStatusBlocking()
+        }
+    }
+
+    /**
+     * 敏感应用安全模式在真正关闭无障碍后调用。心跳必须先同步失效，避免健康检查用
+     * 暂停前的旧心跳提前关闭刚建立的覆盖缺口。
+     */
+    fun markA11yPaused(note: String) {
+        val context = requireNotNull(appContext) { "LedgerKernel 尚未初始化" }
+        check(
+            context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putLong(PREF_LAST_A11Y_HEARTBEAT_AT, 0L)
+                .commit()
+        ) { "无障碍暂停心跳无法持久化" }
+        runCallbackSync {
+            val dao = requireDb().coverageGapDao()
+            if (dao.countOpenByDetector(GapDetectors.A11Y_SERVICE) == 0L) {
+                dao.insert(
+                    CoverageGapEntity(
+                        detector = GapDetectors.A11Y_SERVICE,
+                        startedAtMs = System.currentTimeMillis(),
+                        endedAtMs = null,
+                        state = GapState.ACTIVE,
+                        note = note,
+                    )
+                )
+            }
+        }
         submitAsync { refreshStatusBlocking() }
     }
 

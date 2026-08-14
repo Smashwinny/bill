@@ -71,6 +71,9 @@ abstract class ObservationDao {
     @Query("SELECT * FROM raw_observation WHERE id = :id")
     abstract fun findById(id: Long): RawObservationEntity?
 
+    @Query("SELECT COALESCE(MAX(received_at_ms), 0) FROM raw_observation")
+    abstract fun maxReceivedAtMs(): Long
+
     @Query("UPDATE raw_observation SET duplicate_count = duplicate_count + 1 WHERE id = :id")
     protected abstract fun incrementDuplicate(id: Long)
 
@@ -142,6 +145,22 @@ abstract class ObservationDao {
                 return IngestOutcome.Revised(existing.id)
             }
         }
+    }
+
+    /**
+     * fsync outbox 重放入口。若数据库已经提交相同内容，或当前内容的接收时间更新，说明
+     * 文件只是“提交后未删除”的残留/旧修订，不增加 duplicate_count，也不回滚新修订。
+     */
+    @Transaction
+    open fun ingestDurableCallback(observation: RawObservationEntity): IngestOutcome {
+        val existing = findBySourceAndKey(observation.source, observation.sourceKey)
+        if (existing != null &&
+            (existing.contentHash == observation.contentHash ||
+                existing.receivedAtMs >= observation.receivedAtMs)
+        ) {
+            return IngestOutcome.Duplicate(existing.id)
+        }
+        return ingest(observation)
     }
 
     @Query("SELECT * FROM raw_observation WHERE parse_state = 'PENDING_PARSE' ORDER BY id LIMIT :limit")

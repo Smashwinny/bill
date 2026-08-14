@@ -3,6 +3,7 @@ package com.hulk.pillsapp.ledger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -12,6 +13,39 @@ import org.junit.Test
  * 数据库约束行为（唯一索引、INSERT OR IGNORE 冲突计数）在真机阶段抽样复核。
  */
 class KernelLogicTest {
+    @Test
+    fun durableObservationSchedulesParseBeforeOutboxCompletionFailure() {
+        val events = mutableListOf<String>()
+        val failure = runCatching {
+            DurableObservationCommitOrder.commit(
+                ingest = {
+                    events += "db-committed"
+                    IngestOutcome.New(42L)
+                },
+                scheduleProcessing = {
+                    events += "parse-scheduled-${it.id}"
+                },
+                completeOutbox = {
+                    events += "outbox-delete-fsync"
+                    error("injected directory fsync failure")
+                },
+            )
+        }.exceptionOrNull()
+
+        assertNotNull(failure)
+        assertEquals(
+            listOf("db-committed", "parse-scheduled-42", "outbox-delete-fsync"),
+            events,
+        )
+    }
+
+    @Test
+    fun observationRecoveryRequiresOutboxAndPendingParseBothEmpty() {
+        assertTrue(ObservationRecoveryRules.isComplete(false, 0L))
+        assertFalse(ObservationRecoveryRules.isComplete(true, 0L))
+        assertFalse(ObservationRecoveryRules.isComplete(false, 1L))
+        assertFalse(ObservationRecoveryRules.isComplete(true, 1L))
+    }
 
     // ---------------------------------------------------------------
     // V1 §5.4 / V1.1 §4：同 key 投递决策

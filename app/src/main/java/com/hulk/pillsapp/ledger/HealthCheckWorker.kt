@@ -33,6 +33,8 @@ class HealthCheckWorker(
         } else {
             LedgerKernel.openGap(GapDetectors.A11Y_SERVICE, "周期健康检查：行为学习服务未连接或权限已失效")
         }
+        // 统一恢复路径同时审计 outbox 与 PENDING_PARSE；本 Worker 禁止绕过该判定直接关 gap。
+        LedgerKernel.drainObservationOutbox()
         LedgerKernel.markHealthCheck()
         return Result.success()
     }
