@@ -8,6 +8,13 @@ import org.junit.Test
 
 class BehaviorLearningLogicTest {
     @Test
+    fun ambiguousGapClosesOnlyAfterEveryConflictIsResolved() {
+        assertFalse(shouldCloseAmbiguousRepeatGap(2))
+        assertFalse(shouldCloseAmbiguousRepeatGap(1))
+        assertTrue(shouldCloseAmbiguousRepeatGap(0))
+    }
+
+    @Test
     fun onlyFinalSuccessCreatesTerminalAndExtractsUniqueAmount() {
         assertNull(BehaviorTextClassifier.terminal(listOf("订单处理中，待支付 10.00元")))
         assertNull(BehaviorTextClassifier.terminal(listOf("支付失败 ￥10.00")))

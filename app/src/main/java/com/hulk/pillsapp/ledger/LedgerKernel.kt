@@ -1195,6 +1195,15 @@ object LedgerKernel {
             nowMs = now,
         )
         if (result.changed) {
+            if (shouldCloseAmbiguousRepeatGap(
+                    requireDb().behaviorDao().countPendingAmbiguousRepeats()
+                )
+            ) {
+                requireDb().coverageGapDao().closeOpenByDetector(
+                    GapDetectors.A11Y_AMBIGUOUS_REPEAT,
+                    now,
+                )
+            }
             appContext?.let { context ->
                 BehaviorCandidateNotifier.cancel(context, candidateId)
                 result.candidate?.takeIf { it.state == BehaviorCandidateState.AUTO_RECORDED }

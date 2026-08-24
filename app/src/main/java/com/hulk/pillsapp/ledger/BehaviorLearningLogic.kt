@@ -200,6 +200,11 @@ data class BehaviorActionResult(
     val candidate: BehaviorCandidateEntity?,
 )
 
+internal fun shouldCloseAmbiguousRepeatGap(unresolvedCount: Long): Boolean {
+    require(unresolvedCount >= 0L)
+    return unresolvedCount == 0L
+}
+
 object BehaviorDecisionEngine {
     fun apply(
         db: LedgerDatabase,

@@ -448,6 +448,12 @@ abstract class BehaviorDao {
     @Query("SELECT COUNT(*) FROM behavior_candidate WHERE state = :state")
     abstract fun countByState(state: BehaviorCandidateState): Long
 
+    @Query(
+        "SELECT COUNT(*) FROM behavior_candidate " +
+            "WHERE state = 'PENDING' AND ambiguous_repeat_count > 0"
+    )
+    abstract fun countPendingAmbiguousRepeats(): Long
+
     @Query("SELECT COUNT(*) FROM behavior_template WHERE auto_enabled = 1")
     abstract fun countAutoTemplates(): Long
 
