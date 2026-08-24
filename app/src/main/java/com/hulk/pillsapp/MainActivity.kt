@@ -14,9 +14,13 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,12 +38,19 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -47,6 +58,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -54,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import kotlinx.coroutines.launch
@@ -74,6 +87,10 @@ import com.hulk.pillsapp.ledger.StatementImportStatus
 import com.hulk.pillsapp.ledger.StatementImportUiState
 import com.hulk.pillsapp.ledger.StatementPreviewIssue
 import com.hulk.pillsapp.ledger.StatementSourceKind
+import com.hulk.pillsapp.ui.AutomaticLedgerTheme
+import com.hulk.pillsapp.ui.HomeHealthInput
+import com.hulk.pillsapp.ui.HomeHealthLevel
+import com.hulk.pillsapp.ui.deriveHomeHealth
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -156,7 +173,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         refreshState(this)
         setContent {
-            MaterialTheme {
+            AutomaticLedgerTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val tick by refreshTick.collectAsState()
                     AppHome(
@@ -267,6 +284,19 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private enum class AppDestination(
+    val label: String,
+    val symbol: String,
+    val title: String,
+    val subtitle: String,
+) {
+    OVERVIEW("首页", "账", "自动账本", "今天需要关注什么"),
+    REVIEW("待核验", "核", "待核验", "付款、退款与自动记录"),
+    RECONCILE("对账", "对", "对账中心", "来源覆盖、账单与负债"),
+    SETTINGS("设置", "设", "设置与诊断", "权限、保活和开发工具"),
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AppHome(
     refreshTick: Int,
@@ -300,49 +330,124 @@ private fun AppHome(
     var reportExportPath by remember { mutableStateOf<String?>(null) }
     var reportText by remember { mutableStateOf("") }
     var showDeveloperTools by rememberSaveable { mutableStateOf(false) }
-    val scrollState = rememberScrollState()
+    var destination by rememberSaveable { mutableStateOf(AppDestination.OVERVIEW) }
 
     LaunchedEffect(Unit) { onRefresh() }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .verticalScroll(scrollState)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.Top,
-            horizontalAlignment = Alignment.Start,
-        ) {
-            AppHomeHeaderSection(state)
-            BehaviorLearningSection(
-                refreshTick = refreshTick,
-                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                onRequestNotificationPermission = onRequestNotificationPermission,
-                onSafeLaunchSensitive = onSafeLaunchSensitive,
-                onOpenUsageAccessSettings = onOpenUsageAccessSettings,
-                onRestoreSensitiveMode = onRestoreSensitiveMode,
-                onRefresh = onRefresh,
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(destination.title, style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            destination.subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                actions = {
+                    TextButton(onClick = onRefresh) { Text("刷新") }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                ),
             )
-            KernelStatusSection()
-            M2ChannelSection(
-                refreshTick = refreshTick,
-                onRequestSmsPermissions = onRequestSmsPermissions,
-                onOpenAutostartSettings = onOpenAutostartSettings,
-                onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
-            )
-            DebtDiscoverySection()
-            SourceCoverageAndImportSection(onSelectStatementFile)
-
-            Spacer(modifier = Modifier.height(20.dp))
-            Button(
-                onClick = { showDeveloperTools = !showDeveloperTools },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (showDeveloperTools) "收起开发测试工具" else "展开开发测试工具")
+        },
+        bottomBar = {
+            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                AppDestination.entries.forEach { item ->
+                    NavigationBarItem(
+                        selected = destination == item,
+                        onClick = { destination = item },
+                        icon = {
+                            Text(
+                                item.symbol,
+                                fontWeight = if (destination == item) FontWeight.Bold else FontWeight.Medium,
+                            )
+                        },
+                        label = { Text(item.label) },
+                    )
+                }
             }
-            Text("通知探针、原始事件和测试数据清理默认收起，不影响日常自动记账。")
+        },
+    ) { contentPadding ->
+        key(destination) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(contentPadding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                horizontalAlignment = Alignment.Start,
+            ) {
+                when (destination) {
+                    AppDestination.OVERVIEW -> LedgerOverviewPage(
+                        listenerState = state,
+                        onNavigate = { destination = it },
+                    )
 
-            if (showDeveloperTools) {
+                    AppDestination.REVIEW -> {
+                        PageIntro(
+                            eyebrow = "INBOX",
+                            title = "先确认，再入账",
+                            description = "系统发现的行为只是一条线索。金额和用途由你确认后，才会成为正式成功记录。",
+                        )
+                        LedgerPanel {
+                            BehaviorLearningSection(
+                                refreshTick = refreshTick,
+                                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                                onRequestNotificationPermission = onRequestNotificationPermission,
+                                onSafeLaunchSensitive = onSafeLaunchSensitive,
+                                onOpenUsageAccessSettings = onOpenUsageAccessSettings,
+                                onRestoreSensitiveMode = onRestoreSensitiveMode,
+                                onRefresh = onRefresh,
+                            )
+                        }
+                    }
+
+                    AppDestination.RECONCILE -> {
+                        PageIntro(
+                            eyebrow = "RECONCILE",
+                            title = "用权威来源查漏补缺",
+                            description = "通知和行为用于及时发现，账单与账户余额用于确认有没有漏记、多记或重复还款。",
+                        )
+                        LedgerPanel { SourceCoverageAndImportSection(onSelectStatementFile) }
+                        LedgerPanel { DebtDiscoverySection() }
+                        LedgerPanel { KernelStatusSection() }
+                    }
+
+                    AppDestination.SETTINGS -> {
+                        PageIntro(
+                            eyebrow = "SETTINGS",
+                            title = "让后台状态一眼可见",
+                            description = "授权、真实连接、保活和诊断分开显示；已授权不再等同于正在采集。",
+                        )
+                        LedgerPanel { AppHomeHeaderSection(state) }
+                        LedgerPanel {
+                            M2ChannelSection(
+                                refreshTick = refreshTick,
+                                onRequestSmsPermissions = onRequestSmsPermissions,
+                                onOpenAutostartSettings = onOpenAutostartSettings,
+                                onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
+                            )
+                        }
+                        LedgerPanel {
+                            Button(
+                                onClick = { showDeveloperTools = !showDeveloperTools },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(if (showDeveloperTools) "收起开发测试工具" else "展开开发测试工具")
+                            }
+                            Text(
+                                "通知探针、原始事件和测试数据清理默认收起，不影响日常记账。",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+
+                            if (showDeveloperTools) {
                 Spacer(modifier = Modifier.height(20.dp))
                 ProbeConfigurationSection(
                     activeProbeSession = activeProbeSession,
@@ -481,16 +586,196 @@ private fun AppHome(
                         },
                     )
                 }
+                            }
+                        }
+                    }
+                }
             }
         }
+    }
+}
 
-        if (scrollState.value > 240) {
-            Button(
-                onClick = { coroutineScope.launch { scrollState.animateScrollTo(0) } },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            ) {
-                Text("↑ 回到记账与敏感应用")
+@Composable
+private fun LedgerOverviewPage(
+    listenerState: ListenerStatusState,
+    onNavigate: (AppDestination) -> Unit,
+) {
+    val accessibility by BehaviorAccessibilityState.state.collectAsState()
+    val status by LedgerKernel.status.collectAsState()
+    val health = deriveHomeHealth(
+        HomeHealthInput(
+            notificationPermission = listenerState.permissionEnabled,
+            notificationConnected = listenerState.isConnected,
+            accessibilityPermission = accessibility.permissionEnabled,
+            accessibilityConnected = accessibility.serviceConnected,
+            accessibilityHeartbeatFresh = status.a11yHeartbeatFresh,
+            pendingParseCount = status.pendingParseCount,
+            openGapCount = status.openGapCount,
+        )
+    )
+    val healthColors = when (health.level) {
+        HomeHealthLevel.HEALTHY -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+        HomeHealthLevel.ATTENTION -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
+        HomeHealthLevel.SETUP_REQUIRED -> MaterialTheme.colorScheme.tertiaryContainer to MaterialTheme.colorScheme.onTertiaryContainer
+    }
+
+    PageIntro(
+        eyebrow = "PERSONAL LEDGER",
+        title = "每一笔，都先有证据",
+        description = "自动发现付款和退款；不确定的内容交给你确认，最后再用账单完成对账。",
+    )
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
+        colors = CardDefaults.cardColors(containerColor = healthColors.first),
+    ) {
+        Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(health.title, style = MaterialTheme.typography.headlineSmall, color = healthColors.second)
+            Text(health.description, color = healthColors.second)
+            health.issues.take(4).forEach { issue ->
+                Text("• $issue", style = MaterialTheme.typography.bodyMedium, color = healthColors.second)
             }
+            if (health.level != HomeHealthLevel.HEALTHY) {
+                FilledTonalButton(onClick = { onNavigate(AppDestination.SETTINGS) }) {
+                    Text("查看设置与诊断")
+                }
+            }
+        }
+    }
+
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        MetricCard("待核验", (status.behaviorPendingCount + status.behaviorAutoRecordedCount).toString(), Modifier.weight(1f))
+        MetricCard("已确认", status.behaviorConfirmedCount.toString(), Modifier.weight(1f))
+        MetricCard("覆盖缺口", status.openGapCount.toString(), Modifier.weight(1f))
+    }
+
+    LedgerPanel(title = "现在可以做什么", subtitle = "把高频动作放在首页，复杂设置留在后面") {
+        NavigationActionCard(
+            title = "处理待核验线索",
+            description = "确认金额、用途，或排除不是付款的行为",
+            badge = status.behaviorPendingCount + status.behaviorAutoRecordedCount,
+            onClick = { onNavigate(AppDestination.REVIEW) },
+        )
+        NavigationActionCard(
+            title = "检查来源覆盖",
+            description = "查看哪些来源只有实时线索、还没有账单兜底",
+            badge = status.sourcesWithoutStatementCount,
+            onClick = { onNavigate(AppDestination.RECONCILE) },
+        )
+    }
+
+    LedgerPanel(title = "后续开发路线", subtitle = "前端骨架先稳定，数据能力按可信度逐层接入") {
+        RoadmapRow("1", "采集健康", "真实连接、队列和覆盖缺口")
+        RoadmapRow("2", "统一待核验", "行为、通知、短信进入同一个收件箱")
+        RoadmapRow("3", "正式账本与统计", "日/月账目、分类、退款和负债")
+        RoadmapRow("4", "备份与同步", "加密导出、换机恢复，再考虑远端同步")
+    }
+}
+
+@Composable
+private fun PageIntro(eyebrow: String, title: String, description: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            eyebrow,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(title, style = MaterialTheme.typography.headlineSmall)
+        Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun LedgerPanel(
+    title: String? = null,
+    subtitle: String? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            title?.let { Text(it, style = MaterialTheme.typography.titleLarge) }
+            subtitle?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+private fun RowScope.MetricCard(label: String, value: String, modifier: Modifier = Modifier) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = MaterialTheme.shapes.medium,
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 16.dp)) {
+            Text(value, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
+            Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun NavigationActionCard(
+    title: String,
+    description: String,
+    badge: Long,
+    onClick: () -> Unit,
+) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer,
+                shape = MaterialTheme.shapes.small,
+            ) {
+                Text(
+                    badge.toString(),
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RoadmapRow(number: String, title: String, detail: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.shapes.small),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(number, color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold)
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

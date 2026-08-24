@@ -21,8 +21,8 @@ android {
         applicationId = "com.hulk.pillsapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 19
-        versionName = "1.8.0-m5-daily-dashboard"
+        versionCode = 20
+        versionName = "1.9.0-m6-ui-shell"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(

@@ -25,6 +25,9 @@ secret.properties
 # Generated outputs
 app/build/outputs/
 
+# Project-local temporary artifacts
+/tmp/
+
 # OS and editor
 .DS_Store
 *.swp
