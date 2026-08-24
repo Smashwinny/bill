@@ -21,8 +21,8 @@ android {
         applicationId = "com.hulk.pillsapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 23
-        versionName = "1.9.3-m6-conflict-resolution"
+        versionCode = 24
+        versionName = "1.9.4-m6-restore-notification"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(

@@ -1164,6 +1164,7 @@ internal object SensitiveModeNotifier {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(context, CHANNEL_ID)
+            .setContentIntent(restore)
             .addAction(0, "已离开，立即恢复", restore)
             .setOngoing(true)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
