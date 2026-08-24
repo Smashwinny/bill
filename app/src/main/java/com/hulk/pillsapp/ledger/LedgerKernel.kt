@@ -198,10 +198,11 @@ object LedgerKernel {
         val databaseTimestampFloor = callbackExecutor.submit<Long> {
             requireDb().observationDao().maxReceivedAtMs()
         }.get(2, TimeUnit.SECONDS)
-        val pendingTimestampFloor = runCatching {
-            requireNotNull(observationOutbox).pending().maxOfOrNull { it.observation.receivedAtMs } ?: 0L
-        }.onFailure(::recordAsyncFailure).getOrDefault(0L)
-        callbackTimestampFloor = maxOf(databaseTimestampFloor, pendingTimestampFloor)
+        // Do not enumerate/decrypt the callback outbox on the application main thread.
+        // HyperOS Keystore access can take seconds per cold-start request; startup recovery is
+        // already handled by drainObservationOutbox() on callbackExecutor. A recovered row keeps
+        // its original receivedAtMs, while new callbacks remain monotonic above committed rows.
+        callbackTimestampFloor = databaseTimestampFloor
         runSync { requireDb().coverageGapDao().normalizeLegacyOpenState() }
     }
 

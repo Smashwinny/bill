@@ -26,6 +26,9 @@ object DbCrypto {
     private const val GCM_IV_LENGTH = 12
     private const val GCM_TAG_BITS = 128
 
+    @Volatile
+    private var cachedKeystoreKey: SecretKey? = null
+
     fun getOrCreatePassphrase(context: Context): ByteArray {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         val wrapped = prefs.getString(PREF_WRAPPED, null)
@@ -48,6 +51,13 @@ object DbCrypto {
     fun decryptLocalArtifact(encrypted: ByteArray): ByteArray = unwrap(encrypted)
 
     private fun keystoreKey(): SecretKey {
+        cachedKeystoreKey?.let { return it }
+        return synchronized(this) {
+            cachedKeystoreKey ?: loadOrCreateKeystoreKey().also { cachedKeystoreKey = it }
+        }
+    }
+
+    private fun loadOrCreateKeystoreKey(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
