@@ -112,6 +112,12 @@ internal object RetryScheduleGuard {
     }
 }
 
+internal fun isObservationRecoveryCaughtUp(processedBatchSize: Int, batchLimit: Int): Boolean {
+    require(processedBatchSize >= 0)
+    require(batchLimit > 0)
+    return processedBatchSize < batchLimit
+}
+
 /**
  * V1.1 §4 写入管线的实现。
  *
@@ -541,17 +547,6 @@ object LedgerKernel {
         try {
             val outbox = requireNotNull(observationOutbox)
             val pendingOutbox = outbox.pendingBatch(OBSERVATION_RECOVERY_BATCH_SIZE)
-            val pendingParseCount = requireDb().observationDao().countPendingParse()
-            if (!ObservationRecoveryRules.isComplete(
-                    hasPendingOutbox = pendingOutbox.isNotEmpty(),
-                    pendingParseCount = pendingParseCount,
-                )
-            ) {
-                openGapAsync(
-                    GapDetectors.CALLBACK_OUTBOX,
-                    "通知/SMS 加密待办或数据库待解析观察仍未完成",
-                )
-            }
             val outcomes = requireDb().observationDao().ingestDurableBatch(
                 pendingOutbox.map { it.observation },
             )
@@ -562,6 +557,16 @@ object LedgerKernel {
             // single directory fsync, surviving files replay idempotently on the next launch.
             outbox.completeBatch(pendingOutbox.map { it.file })
             scheduleDurableObservationProcessingBatch(committedObservationIds)
+            val caughtUpWithHistoricalBacklog = isObservationRecoveryCaughtUp(
+                processedBatchSize = pendingOutbox.size,
+                batchLimit = OBSERVATION_RECOVERY_BATCH_SIZE,
+            )
+            if (caughtUpWithHistoricalBacklog) {
+                requireDb().coverageGapDao().closeOpenByDetector(
+                    GapDetectors.CALLBACK_OUTBOX,
+                    System.currentTimeMillis(),
+                )
+            }
             needsAnotherBatch = outbox.hasPending()
             if (!needsAnotherBatch) schedulePendingObservationRecovery()
         } catch (failure: Throwable) {

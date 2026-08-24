@@ -25,4 +25,11 @@ class ObservationOutboxBatchTest {
             directory.deleteRecursively()
         }
     }
+
+    @Test
+    fun onlyShortFinalBatchMarksHistoricalRecoveryCaughtUp() {
+        assertEquals(false, isObservationRecoveryCaughtUp(200, 200))
+        assertEquals(true, isObservationRecoveryCaughtUp(199, 200))
+        assertEquals(true, isObservationRecoveryCaughtUp(0, 200))
+    }
 }
