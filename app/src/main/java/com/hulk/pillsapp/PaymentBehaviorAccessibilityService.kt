@@ -1,11 +1,16 @@
 package com.hulk.pillsapp
 
 import android.accessibilityservice.AccessibilityService
+import android.graphics.Bitmap
+import android.os.Build
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import com.hulk.pillsapp.ledger.BEHAVIOR_WINDOW_MAX_EVENTS
 import com.hulk.pillsapp.ledger.BEHAVIOR_WINDOW_MS
 import com.hulk.pillsapp.ledger.BehaviorTextClassifier
 import com.hulk.pillsapp.ledger.BehaviorEpisodeTracker
+import com.hulk.pillsapp.ledger.BehaviorDebugEvidenceStore
+import com.hulk.pillsapp.ledger.PackagePaymentSequenceTracker
 import com.hulk.pillsapp.ledger.BehaviorWindowFeature
 import com.hulk.pillsapp.ledger.GapDetectors
 import com.hulk.pillsapp.ledger.LedgerKernel
@@ -17,7 +22,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 事件驱动采集：不截图、不遍历节点树。页面原文只在本次回调内用于分类，随后即丢弃。
+ * 事件驱动采集：不遍历节点树。页面原文只在本次回调内用于分类，随后即丢弃；用户主动
+ * 开启调试证据后，疑似候选触发瞬间可保存一张 Keystore 加密、七天过期的本地截图。
  */
 class PaymentBehaviorAccessibilityService : AccessibilityService() {
     private var restoreAttemptAtCreate: String? = null
@@ -40,8 +46,13 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
     }
     private val window = ArrayDeque<BehaviorWindowFeature>()
     private val episodeTracker = BehaviorEpisodeTracker { "a11y-${java.util.UUID.randomUUID()}" }
+    private val packageSequenceTracker = PackagePaymentSequenceTracker()
+    private var windowPackageName: String? = null
     private val sensitiveRegistryExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "sensitive-registry-events").apply { isDaemon = true }
+    }
+    private val evidenceExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "behavior-debug-evidence").apply { isDaemon = true }
     }
     private val sensitiveNoticeExecutor = ThreadPoolExecutor(
         1,
@@ -148,6 +159,10 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
         if (guardWorkGate.leaveGuard(packageName)) {
             LedgerKernel.closeOpenGapsAsync(sensitiveProfileGuardDetector(packageName), now)
         }
+        if (windowPackageName != packageName) {
+            window.clear()
+            windowPackageName = packageName
+        }
         prune(now)
         episodeTracker.onContext(packageName, event.windowId, now)
 
@@ -179,8 +194,16 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
                 if (!submitted) warningWorkGate.cancel(workKey)
             }
         }
-        val intent = event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
-            BehaviorTextClassifier.hasPaymentIntent(texts)
+        if (!BehaviorTextClassifier.isSupportedBehaviorPackage(packageName)) {
+            window.clear()
+            windowPackageName = null
+            return
+        }
+        val packageSequence = packageSequenceTracker.observe(packageName, texts, now)
+        val intent = packageSequence.intent || (
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
+                BehaviorTextClassifier.hasPaymentIntent(texts)
+            )
         val classHash = sha256Hex(event.className?.toString().orEmpty()).take(12)
         val role = when {
             intent -> "INTENT_CLICK"
@@ -200,7 +223,7 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
         )
         while (window.size > BEHAVIOR_WINDOW_MAX_EVENTS) window.removeFirst()
 
-        val terminal = BehaviorTextClassifier.terminal(texts)
+        val terminal = packageSequence.terminal ?: BehaviorTextClassifier.terminal(texts)
         if (!intent && terminal == null) return
         // 每个意图/终态都重新读取；支付 App 热更新后旧版本模板会立即失效。
         val appVersionCode = packageVersionCode(packageName)
@@ -218,6 +241,10 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
             )
         }
         terminal ?: return
+        if (!episodeTracker.hasRecentIntent(packageName, now) &&
+            packageSequence.terminal == null &&
+            !BehaviorTextClassifier.allowsTerminalWithoutIntent(packageName)
+        ) return
         val terminalIdentity = listOf(
             terminal.kind.name,
             terminal.amountCents?.toString().orEmpty(),
@@ -249,6 +276,7 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
             )
             throw IllegalStateException("behavior signal could not be persisted")
         }
+        captureDebugEvidence(signal.clipId)
     }
 
     override fun onInterrupt() {
@@ -261,6 +289,7 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
         heartbeatHandler.removeCallbacks(heartbeat)
         sensitiveRegistryExecutor.shutdown()
         sensitiveNoticeExecutor.shutdown()
+        evidenceExecutor.shutdown()
         if (BehaviorAccessibilityState.clearCallbackConnected(this, this)) {
             LedgerKernel.markA11yDisconnected(
                 SensitiveAppMode.activeDisconnectNote(this)
@@ -275,6 +304,45 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
             window.removeFirst()
         }
         episodeTracker.prune(now)
+    }
+
+    private fun captureDebugEvidence(publicId: String) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
+            !BehaviorDebugEvidenceStore.isEnabled(this)
+        ) return
+        captureDebugEvidenceApi30(publicId)
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+    private fun captureDebugEvidenceApi30(publicId: String) {
+        takeScreenshot(
+            Display.DEFAULT_DISPLAY,
+            evidenceExecutor,
+            object : TakeScreenshotCallback {
+                override fun onSuccess(screenshot: ScreenshotResult) {
+                    val buffer = screenshot.hardwareBuffer
+                    try {
+                        val wrapped = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace) ?: return
+                        val software = wrapped.copy(Bitmap.Config.ARGB_8888, false) ?: return
+                        try {
+                            BehaviorDebugEvidenceStore.save(
+                                this@PaymentBehaviorAccessibilityService,
+                                publicId,
+                                software,
+                            )
+                        } finally {
+                            software.recycle()
+                        }
+                    } finally {
+                        buffer.close()
+                    }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    // FLAG_SECURE、系统策略或瞬时无可用窗口时安全退化；候选本身仍正常保存。
+                }
+            },
+        )
     }
 
     private fun scheduleRegistryRefresh() {

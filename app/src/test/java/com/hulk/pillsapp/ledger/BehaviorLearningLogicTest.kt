@@ -8,6 +8,37 @@ import org.junit.Test
 
 class BehaviorLearningLogicTest {
     @Test
+    fun genericTerminalWithoutIntentIsLimitedToPaymentPackages() {
+        assertFalse(BehaviorTextClassifier.isSupportedBehaviorPackage("com.autonavi.minimap"))
+        assertTrue(BehaviorTextClassifier.isSupportedBehaviorPackage("com.tencent.mobileqq"))
+        assertFalse(BehaviorTextClassifier.allowsTerminalWithoutIntent("com.autonavi.minimap"))
+        assertTrue(BehaviorTextClassifier.allowsTerminalWithoutIntent("com.eg.android.AlipayGphone"))
+        assertTrue(BehaviorTextClassifier.allowsTerminalWithoutIntent("com.tencent.mm"))
+    }
+
+    @Test
+    fun qqRedPacketSequenceCarriesAmountToSuccesslessTerminal() {
+        val tracker = PackagePaymentSequenceTracker()
+        val intent = tracker.observe("com.tencent.mobileqq", listOf("发红包", "￥16.00"), 1_000)
+        assertTrue(intent.intent)
+        assertNull(intent.terminal)
+
+        val terminal = tracker.observe("com.tencent.mobileqq", listOf("红包已发送，等待对方领取"), 2_000)
+        assertEquals(1_600L, terminal.terminal?.amountCents)
+        assertEquals("QQ_RED_PACKET_SENT", terminal.terminal?.terminalCode)
+    }
+
+    @Test
+    fun redPacketWordsNeverCrossPackageBoundary() {
+        val tracker = PackagePaymentSequenceTracker()
+        tracker.observe("com.tencent.mobileqq", listOf("发红包", "16.00元"), 1_000)
+
+        val map = tracker.observe("com.autonavi.minimap", listOf("等待领取", "10.00元"), 2_000)
+        assertFalse(map.intent)
+        assertNull(map.terminal)
+    }
+
+    @Test
     fun ambiguousGapClosesOnlyAfterEveryConflictIsResolved() {
         assertFalse(shouldCloseAmbiguousRepeatGap(2))
         assertFalse(shouldCloseAmbiguousRepeatGap(1))

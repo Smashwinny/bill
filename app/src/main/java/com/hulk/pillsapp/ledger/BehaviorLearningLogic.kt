@@ -82,6 +82,10 @@ class BehaviorEpisodeTracker(
         latchedTerminals.clear()
     }
 
+    fun hasRecentIntent(packageName: String, nowMs: Long): Boolean = episode?.let {
+        it.packageName == packageName && nowMs - it.startedAtMs in 0..BEHAVIOR_WINDOW_MS
+    } == true
+
     fun onTerminal(
         packageName: String,
         windowId: Int,
@@ -302,6 +306,24 @@ object BehaviorTextClassifier {
     fun hasPaymentIntent(texts: List<String>): Boolean =
         paymentIntent.containsMatchIn(normalize(texts))
 
+    fun isSupportedBehaviorPackage(packageName: String): Boolean = packageName in setOf(
+        "com.eg.android.AlipayGphone",
+        "com.tencent.mm",
+        "com.tencent.mobileqq",
+        "com.unionpay",
+        "com.mipay.wallet",
+        "cmb.pb",
+        "com.chinamworld.bocmbci",
+    )
+
+    fun allowsTerminalWithoutIntent(packageName: String): Boolean = packageName in setOf(
+        "com.eg.android.AlipayGphone",
+        "com.tencent.mm",
+        "com.unionpay",
+    )
+
+    fun singleAmount(texts: List<String>): Long? = extractAmounts(normalize(texts)).singleOrNull()
+
     fun routeSignature(
         packageName: String,
         appVersionCode: Long,
@@ -402,4 +424,64 @@ object BehaviorTextClassifier {
             .movePointRight(2)
             .longValueExact()
     }.getOrNull()
+}
+
+data class PackageSequenceMatch(
+    val intent: Boolean = false,
+    val terminal: BehaviorTerminalMatch? = null,
+)
+
+/**
+ * 包级短时状态机。只保存金额与阶段，不保存页面原文；规则不能跨包复用，防止“红包”或
+ * “已发送”等宽泛文字污染地图、聊天列表和广告页面。
+ */
+class PackagePaymentSequenceTracker {
+    private data class Pending(
+        val packageName: String,
+        val startedAtMs: Long,
+        val amountCents: Long?,
+    )
+
+    private var pending: Pending? = null
+
+    fun observe(packageName: String, texts: List<String>, nowMs: Long): PackageSequenceMatch {
+        val supported = packageName == QQ_PACKAGE || packageName == WECHAT_PACKAGE
+        if (!supported) {
+            if (pending?.packageName != packageName) pending = null
+            return PackageSequenceMatch()
+        }
+        val text = texts.joinToString(" ").take(2_048)
+        val amount = BehaviorTextClassifier.singleAmount(texts)
+        val isIntent = RED_PACKET_INTENT.containsMatchIn(text)
+        if (isIntent) pending = Pending(packageName, nowMs, amount)
+        val current = pending?.takeIf {
+            it.packageName == packageName && nowMs - it.startedAtMs in 0..SEQUENCE_WINDOW_MS
+        }
+        if (current != null && amount != null && current.amountCents == null) {
+            pending = current.copy(amountCents = amount)
+        }
+        if (!RED_PACKET_TERMINAL.containsMatchIn(text)) {
+            if (pending?.let { nowMs - it.startedAtMs > SEQUENCE_WINDOW_MS } == true) pending = null
+            return PackageSequenceMatch(intent = isIntent)
+        }
+        val final = pending?.takeIf { it.packageName == packageName }
+        pending = null
+        return PackageSequenceMatch(
+            intent = isIntent,
+            terminal = BehaviorTerminalMatch(
+                kind = BehaviorKind.PAYMENT,
+                amountCents = amount ?: final?.amountCents,
+                distinctAmountCount = if (amount != null || final?.amountCents != null) 1 else 0,
+                terminalCode = if (packageName == QQ_PACKAGE) "QQ_RED_PACKET_SENT" else "WECHAT_RED_PACKET_SENT",
+            ),
+        )
+    }
+
+    companion object {
+        const val QQ_PACKAGE = "com.tencent.mobileqq"
+        const val WECHAT_PACKAGE = "com.tencent.mm"
+        private const val SEQUENCE_WINDOW_MS = 15_000L
+        private val RED_PACKET_INTENT = Regex("发红包|发送红包|塞钱进红包|确认发送|立即发送")
+        private val RED_PACKET_TERMINAL = Regex("红包已发送|红包发送成功|已塞钱进红包|等待.{0,8}领取|对方.{0,8}领取")
+    }
 }

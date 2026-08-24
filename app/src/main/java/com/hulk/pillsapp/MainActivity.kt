@@ -47,6 +47,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -56,12 +57,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -75,6 +78,7 @@ import kotlinx.coroutines.withContext
 import com.hulk.pillsapp.ledger.LedgerKernel
 import com.hulk.pillsapp.ledger.BehaviorCandidateEntity
 import com.hulk.pillsapp.ledger.BehaviorCandidateState
+import com.hulk.pillsapp.ledger.BehaviorDebugEvidenceStore
 import com.hulk.pillsapp.ledger.BehaviorDecision
 import com.hulk.pillsapp.ledger.BehaviorKind
 import com.hulk.pillsapp.ledger.SmsBackfill
@@ -1071,6 +1075,9 @@ private fun BehaviorLearningSection(
         SensitiveAppMode.hasControlPermission(context)
     }
     val usageAccessGranted = remember(refreshTick) { UsageAccessState.isGranted(context) }
+    var debugEvidenceEnabled by remember(refreshTick) {
+        mutableStateOf(BehaviorDebugEvidenceStore.isEnabled(context))
+    }
     var registryUi by remember { mutableStateOf(SensitiveRegistryUiState()) }
     LaunchedEffect(refreshTick, usageAccessGranted) {
         registryUi = withContext(Dispatchers.IO) {
@@ -1108,7 +1115,24 @@ private fun BehaviorLearningSection(
         text = "无障碍后台采集：${if (accessibility.permissionEnabled) "已启用（心跳由内核监控）" else "未启用"} · " +
             "确认通知：${if (notificationGranted) "可发送" else "未授权"}"
     )
-    Text(text = "只保留 10 秒内存事件滑窗，不截图、不保存页面原文。连续 5 次确认且零否定的同类行为才允许自动记账。")
+    Text(text = "只保留 10 秒内存事件滑窗，不保存页面原文。调试截图关闭时不截图；连续 5 次确认且零否定的同类行为才允许自动记账。")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("调试证据截图")
+            Text("候选触发时本地加密保存，7 天自动删除；不上传、不参与自动记账。")
+        }
+        Switch(
+            checked = debugEvidenceEnabled,
+            onCheckedChange = { enabled ->
+                BehaviorDebugEvidenceStore.setEnabled(context, enabled)
+                debugEvidenceEnabled = enabled
+            },
+        )
+    }
     Text(
         text = when {
             sensitiveSession?.phase == SensitiveLaunchPhase.RECOVERING ->
@@ -1442,10 +1466,17 @@ private fun SensitiveAppIcon(packageName: String) {
 
 @Composable
 private fun BehaviorCandidateCard(candidate: BehaviorCandidateEntity) {
+    val context = LocalContext.current
     var amountText by remember(candidate.id, candidate.amountCents) {
         mutableStateOf(candidate.amountCents?.let { "%d.%02d".format(it / 100, kotlin.math.abs(it % 100)) }.orEmpty())
     }
     var purpose by remember(candidate.id, candidate.purpose) { mutableStateOf(candidate.purpose.orEmpty()) }
+    var rejectReason by remember(candidate.id) { mutableStateOf("广告或无关页面文字") }
+    val evidenceBitmap by produceState<android.graphics.Bitmap?>(null, candidate.publicId) {
+        value = withContext(Dispatchers.IO) {
+            BehaviorDebugEvidenceStore.load(context, candidate.publicId)
+        }
+    }
     val parsedAmount = remember(amountText) { parseAmountCents(amountText) }
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -1455,6 +1486,15 @@ private fun BehaviorCandidateCard(candidate: BehaviorCandidateEntity) {
             Text(text = "${if (candidate.kind == BehaviorKind.REFUND) "退款" else "付款"} · ${behaviorStateLabels[candidate.state]}")
             Text(text = "来源：${candidate.packageName} · 置信度 ${candidate.confidence}%")
             Text(text = "发生时间：${formatEventTime(candidate.occurredAtMs)}")
+            evidenceBitmap?.let { bitmap ->
+                Text("加密调试截图（仅用于人工判断）")
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "候选触发时的调试截图",
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
+                    contentScale = ContentScale.Fit,
+                )
+            }
             if (candidate.ambiguousRepeatCount > 0) {
                 Text(text = "警告：又收到 ${candidate.ambiguousRepeatCount} 次无法区分的相同成功终态；已保留审计缺口，请核对是否存在另一笔同额交易。")
             }
@@ -1499,9 +1539,25 @@ private fun BehaviorCandidateCard(candidate: BehaviorCandidateEntity) {
                     ) { Text("确认退款") }
                 }
                 TextButton(
-                    onClick = { LedgerKernel.applyBehaviorDecision(candidate.id, BehaviorDecision.REJECT) },
+                    onClick = {
+                        LedgerKernel.applyBehaviorDecision(
+                            candidate.id,
+                            BehaviorDecision.REJECT,
+                            purpose = "误报：$rejectReason",
+                        )
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("不是付款/退款，排除并降低模板置信度") }
+                Text("误报原因")
+                Column {
+                    listOf("广告或无关页面文字", "历史订单", "金额含义错误").forEach { reason ->
+                        FilterChip(
+                            selected = rejectReason == reason,
+                            onClick = { rejectReason = reason },
+                            label = { Text(reason) },
+                        )
+                    }
+                }
             } else {
                 candidate.amountCents?.let { Text(text = "金额：¥%d.%02d".format(it / 100, kotlin.math.abs(it % 100))) }
                 candidate.purpose?.let { Text(text = "用途：$it") }

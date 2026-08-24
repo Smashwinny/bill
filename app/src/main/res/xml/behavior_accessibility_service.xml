@@ -2,6 +2,7 @@
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked|typeViewTextChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
+    android:canTakeScreenshot="true"
     android:canRetrieveWindowContent="false"
     android:description="@string/m5_accessibility_description"
     android:notificationTimeout="100"
