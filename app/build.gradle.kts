@@ -21,8 +21,8 @@ android {
         applicationId = "com.hulk.pillsapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "1.9.0-m6-ui-shell"
+        versionCode = 21
+        versionName = "1.9.1-m6-outbox-recovery"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(

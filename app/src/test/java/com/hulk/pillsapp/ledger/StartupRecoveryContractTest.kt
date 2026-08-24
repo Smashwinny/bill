@@ -17,7 +17,7 @@ class StartupRecoveryContractTest {
 
         assertFalse(initBody.contains("observationOutbox).pending()"))
         assertTrue(source.contains("fun drainObservationOutbox()"))
-        assertTrue(source.contains("callbackExecutor.submit"))
+        assertTrue(source.contains("observationRecoveryExecutor.submit(::drainObservationOutboxBatch)"))
     }
 
     @Test

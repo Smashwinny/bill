@@ -68,6 +68,9 @@ abstract class ObservationDao {
     @Query("SELECT * FROM raw_observation WHERE source = :source AND source_key = :sourceKey LIMIT 1")
     abstract fun findBySourceAndKey(source: ObservationSource, sourceKey: String): RawObservationEntity?
 
+    @Query("SELECT * FROM raw_observation")
+    protected abstract fun allForDurableRecovery(): List<RawObservationEntity>
+
     @Query("SELECT * FROM raw_observation WHERE id = :id")
     abstract fun findById(id: Long): RawObservationEntity?
 
@@ -161,6 +164,75 @@ abstract class ObservationDao {
             return IngestOutcome.Duplicate(existing.id)
         }
         return ingest(observation)
+    }
+
+    /** Load the small identity set once, then replay one bounded outbox batch in order. */
+    @Transaction
+    open fun ingestDurableBatch(observations: List<RawObservationEntity>): List<IngestOutcome> {
+        val existingByIdentity = allForDurableRecovery().associateByTo(LinkedHashMap()) {
+            it.source to it.sourceKey
+        }
+        return observations.map { observation ->
+            val identity = observation.source to observation.sourceKey
+            val existing = existingByIdentity[identity]
+            if (existing != null &&
+                (existing.contentHash == observation.contentHash ||
+                    existing.receivedAtMs >= observation.receivedAtMs)
+            ) {
+                return@map IngestOutcome.Duplicate(existing.id)
+            }
+
+            when (decideIngest(existing?.contentHash, observation.contentHash)) {
+                IngestDecision.NEW -> {
+                    val id = insertIgnore(observation)
+                    if (id == -1L) {
+                        val raced = findBySourceAndKey(observation.source, observation.sourceKey)
+                        if (raced != null) existingByIdentity[identity] = raced
+                        return@map IngestOutcome.Duplicate(raced?.id ?: -1L)
+                    }
+                    insertRevisionIgnore(
+                        ObservationRevisionEntity(
+                            observationId = id,
+                            revisionHash = observation.contentHash,
+                            title = observation.title,
+                            body = observation.body,
+                            revisedAtMs = observation.receivedAtMs,
+                        )
+                    )
+                    existingByIdentity[identity] = observation.copy(id = id)
+                    IngestOutcome.New(id)
+                }
+
+                IngestDecision.DUPLICATE -> IngestOutcome.Duplicate(existing!!.id)
+
+                IngestDecision.REVISION -> {
+                    insertRevisionIgnore(
+                        ObservationRevisionEntity(
+                            observationId = existing!!.id,
+                            revisionHash = observation.contentHash,
+                            title = observation.title,
+                            body = observation.body,
+                            revisedAtMs = observation.receivedAtMs,
+                        )
+                    )
+                    applyRevision(
+                        id = existing.id,
+                        title = observation.title,
+                        body = observation.body,
+                        contentHash = observation.contentHash,
+                        receivedAtMs = observation.receivedAtMs,
+                    )
+                    existingByIdentity[identity] = existing.copy(
+                        title = observation.title,
+                        body = observation.body,
+                        contentHash = observation.contentHash,
+                        receivedAtMs = observation.receivedAtMs,
+                        parseState = ParseState.PENDING_PARSE,
+                    )
+                    IngestOutcome.Revised(existing.id)
+                }
+            }
+        }
     }
 
     @Query("SELECT * FROM raw_observation WHERE parse_state = 'PENDING_PARSE' ORDER BY id LIMIT :limit")

@@ -129,6 +129,7 @@ object LedgerKernel {
     private const val PREF_LAST_HEALTH_CHECK_AT = "last_health_check_at_ms"
     private const val PREF_LAST_A11Y_HEARTBEAT_AT = "last_a11y_heartbeat_at_ms"
     private const val STATEMENT_IMPORT_ROW_BATCH_SIZE = 25
+    private const val OBSERVATION_RECOVERY_BATCH_SIZE = 200
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "ledger-ingest")
@@ -146,7 +147,11 @@ object LedgerKernel {
     private val callbackExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "system-callback-ingest")
     }
+    private val observationRecoveryExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "observation-recovery")
+    }
     private val observationRetryScheduled = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val observationDrainScheduled = java.util.concurrent.atomic.AtomicBoolean(false)
     private val behaviorDashboardActionableLimit = java.util.concurrent.atomic.AtomicInteger(10)
 
     @Volatile
@@ -420,29 +425,23 @@ object LedgerKernel {
                 )
             }
             .getOrNull()
+        if (staged != null) {
+            // The callback is already durable. Coalesce all live and historical files into the
+            // dedicated bounded recovery path instead of queuing one slow SQLCipher transaction
+            // per notification. A crash before import leaves the file for idempotent restart.
+            drainObservationOutbox()
+            return
+        }
         val task = java.util.concurrent.Callable {
             try {
-                if (staged != null) {
-                    processStagedObservation(staged, durableEntity)
-                } else {
-                    val outcome = requireDb().observationDao().ingest(durableEntity)
-                    scheduleObservationProcessing(outcome)
-                }
+                val outcome = requireDb().observationDao().ingest(durableEntity)
+                scheduleObservationProcessing(outcome)
             } catch (failure: Throwable) {
                 recordAsyncFailure(failure)
-                if (staged != null) {
-                    openGapAsync(
-                        GapDetectors.CALLBACK_OUTBOX,
-                        "通知/SMS 加密待办入库延迟，后台持续重试并等待权威对账",
-                    )
-                    schedulePendingObservationRecovery()
-                    scheduleObservationOutboxRetry()
-                } else {
-                    openGapAsync(
-                        GapDetectors.CALLBACK_PERSISTENCE,
-                        "通知/SMS 待办与数据库直写均失败，需权威对账",
-                    )
-                }
+                openGapAsync(
+                    GapDetectors.CALLBACK_PERSISTENCE,
+                    "通知/SMS 待办与数据库直写均失败，需权威对账",
+                )
             }
             Unit
         }
@@ -450,27 +449,12 @@ object LedgerKernel {
             callbackExecutor.submit(task)
         } catch (failure: Throwable) {
             recordAsyncFailure(failure)
-            if (staged != null) {
-                runCatching {
-                    openGapAsync(
-                        GapDetectors.CALLBACK_OUTBOX,
-                        "通知/SMS 加密待办已落盘但后台提交器不可用，等待下次启动重放",
-                    )
-                }.onFailure(::recordAsyncFailure)
-                scheduleObservationOutboxRetry()
-            } else {
-                runCatching {
-                    openGapAsync(
-                        GapDetectors.CALLBACK_PERSISTENCE,
-                        "通知/SMS 待办与数据库提交器均不可用，需权威对账",
-                    )
-                }.onFailure(::recordAsyncFailure)
-            }
-            return
-        }
-        if (!CallbackPersistencePolicy.shouldWaitForDatabase(stagedDurably = staged != null)) {
-            // 文件已经加密、fsync、原子 rename 并同步目录；此处立即归还系统主回调，
-            // 避免通知风暴连续占用主线程而让 Activity 永远停在启动白屏。
+            runCatching {
+                openGapAsync(
+                    GapDetectors.CALLBACK_PERSISTENCE,
+                    "通知/SMS 待办与数据库提交器均不可用，需权威对账",
+                )
+            }.onFailure(::recordAsyncFailure)
             return
         }
         try {
@@ -501,11 +485,17 @@ object LedgerKernel {
     private fun processStagedObservation(
         staged: java.io.File,
         entity: RawObservationEntity,
+        completeOutbox: Boolean = true,
+        scheduleProcessing: Boolean = true,
     ): IngestOutcome {
         return DurableObservationCommitOrder.commit(
             ingest = { requireDb().observationDao().ingestDurableCallback(entity) },
-            scheduleProcessing = { scheduleDurableObservationProcessing(it.id) },
-            completeOutbox = { requireNotNull(observationOutbox).complete(staged) },
+            scheduleProcessing = {
+                if (scheduleProcessing) scheduleDurableObservationProcessing(it.id)
+            },
+            completeOutbox = {
+                if (completeOutbox) requireNotNull(observationOutbox).complete(staged)
+            },
         )
     }
 
@@ -536,33 +526,77 @@ object LedgerKernel {
     }
 
     fun drainObservationOutbox() {
-        callbackExecutor.submit {
-            try {
-                val pendingOutbox = requireNotNull(observationOutbox).pending()
-                val pendingParseCount = requireDb().observationDao().countPendingParse()
-                if (!ObservationRecoveryRules.isComplete(
-                        hasPendingOutbox = pendingOutbox.isNotEmpty(),
-                        pendingParseCount = pendingParseCount,
-                    )
-                ) {
-                    openGapAsync(
-                        GapDetectors.CALLBACK_OUTBOX,
-                        "通知/SMS 加密待办或数据库待解析观察仍未完成",
-                    )
-                }
-                pendingOutbox.forEach { pending ->
-                    processStagedObservation(pending.file, pending.observation)
-                }
-                schedulePendingObservationRecovery()
-            } catch (failure: Throwable) {
-                recordAsyncFailure(failure)
+        if (!observationDrainScheduled.compareAndSet(false, true)) return
+        try {
+            observationRecoveryExecutor.submit(::drainObservationOutboxBatch)
+        } catch (failure: Throwable) {
+            observationDrainScheduled.set(false)
+            recordAsyncFailure(failure)
+            scheduleObservationOutboxRetry()
+        }
+    }
+
+    private fun drainObservationOutboxBatch() {
+        var needsAnotherBatch = false
+        try {
+            val outbox = requireNotNull(observationOutbox)
+            val pendingOutbox = outbox.pendingBatch(OBSERVATION_RECOVERY_BATCH_SIZE)
+            val pendingParseCount = requireDb().observationDao().countPendingParse()
+            if (!ObservationRecoveryRules.isComplete(
+                    hasPendingOutbox = pendingOutbox.isNotEmpty(),
+                    pendingParseCount = pendingParseCount,
+                )
+            ) {
                 openGapAsync(
                     GapDetectors.CALLBACK_OUTBOX,
-                    "通知/SMS 持久待办恢复失败，等待下次启动并需权威对账",
+                    "通知/SMS 加密待办或数据库待解析观察仍未完成",
                 )
-                schedulePendingObservationRecovery()
-                scheduleObservationOutboxRetry()
             }
+            val outcomes = requireDb().observationDao().ingestDurableBatch(
+                pendingOutbox.map { it.observation },
+            )
+            val committedObservationIds = outcomes.map(IngestOutcome::id)
+                .filter { it >= 0L }
+                .distinct()
+            // All database commits happened before deletion. If the process dies before this
+            // single directory fsync, surviving files replay idempotently on the next launch.
+            outbox.completeBatch(pendingOutbox.map { it.file })
+            scheduleDurableObservationProcessingBatch(committedObservationIds)
+            needsAnotherBatch = outbox.hasPending()
+            if (!needsAnotherBatch) schedulePendingObservationRecovery()
+        } catch (failure: Throwable) {
+            // Safe production diagnostic: exception type only. Never log encrypted bytes,
+            // observation contents, file identity, key material, or exception messages.
+            android.util.Log.e("LedgerOutbox", "recovery failed: ${failure.javaClass.name}")
+            recordAsyncFailure(failure)
+            openGapAsync(
+                GapDetectors.CALLBACK_OUTBOX,
+                "通知/SMS 持久待办恢复失败，等待下次启动并需权威对账",
+            )
+            schedulePendingObservationRecovery()
+            scheduleObservationOutboxRetry()
+        } finally {
+            observationDrainScheduled.set(false)
+        }
+
+        // One executor task handles only one bounded batch. Re-enqueueing at the tail lets live
+        // callback commits run between recovery batches instead of starving behind thousands of
+        // historical files.
+        if (needsAnotherBatch) drainObservationOutbox()
+    }
+
+    private fun scheduleDurableObservationProcessingBatch(observationIds: List<Long>) {
+        if (observationIds.isEmpty()) return
+        submitAsync {
+            observationIds.forEach { observationId ->
+                CandidatePromoter.process(requireDb(), observationId)
+                DebtAccountDiscoverer.processPendingForObservation(
+                    requireDb(),
+                    observationId,
+                    ::accountHash,
+                )
+            }
+            refreshStatusBlocking()
         }
     }
 

@@ -85,11 +85,26 @@ class ObservationOutbox(private val directory: File) {
     }
 
     @Synchronized
-    fun pending(): List<Pending> {
+    fun completeBatch(files: List<File>) {
+        var deletedAny = false
+        files.forEach { file ->
+            if (file.exists()) {
+                check(file.delete()) { "observation outbox batch completion failed" }
+                deletedAny = true
+            }
+        }
+        if (deletedAny) syncDirectory()
+    }
+
+    @Synchronized
+    fun pendingBatch(limit: Int): List<Pending> {
+        require(limit > 0) { "limit must be positive" }
         if (!directory.exists()) return emptyList()
-        return directory.listFiles { file -> file.isFile && file.name.endsWith(SUFFIX) }
-            .orEmpty()
-            .sortedWith(compareBy<File> { it.lastModified() }.thenBy { it.name })
+        return selectOldestPendingFiles(
+            directory.listFiles().orEmpty().asList(),
+            SUFFIX,
+            limit,
+        )
             .map { Pending(it, read(it)) }
     }
 
@@ -151,4 +166,17 @@ class ObservationOutbox(private val directory: File) {
             android.system.Os.close(directoryFd)
         }
     }
+}
+
+internal fun selectOldestPendingFiles(
+    files: List<File>,
+    suffix: String,
+    limit: Int,
+): List<File> {
+    require(limit > 0) { "limit must be positive" }
+    return files.asSequence()
+        .filter { it.isFile && it.name.endsWith(suffix) }
+        .sortedWith(compareBy<File> { it.lastModified() }.thenBy { it.name })
+        .take(limit)
+        .toList()
 }
