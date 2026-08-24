@@ -11,6 +11,7 @@ class BehaviorLearningLogicTest {
     fun genericTerminalWithoutIntentIsLimitedToPaymentPackages() {
         assertFalse(BehaviorTextClassifier.isSupportedBehaviorPackage("com.autonavi.minimap"))
         assertTrue(BehaviorTextClassifier.isSupportedBehaviorPackage("com.tencent.mobileqq"))
+        assertTrue(BehaviorTextClassifier.isSupportedBehaviorPackage("com.taobao.taobao"))
         assertFalse(BehaviorTextClassifier.allowsTerminalWithoutIntent("com.autonavi.minimap"))
         assertTrue(BehaviorTextClassifier.allowsTerminalWithoutIntent("com.eg.android.AlipayGphone"))
         assertTrue(BehaviorTextClassifier.allowsTerminalWithoutIntent("com.tencent.mm"))
@@ -36,6 +37,50 @@ class BehaviorLearningLogicTest {
         val map = tracker.observe("com.autonavi.minimap", listOf("等待领取", "10.00元"), 2_000)
         assertFalse(map.intent)
         assertNull(map.terminal)
+    }
+
+    @Test
+    fun taobaoBiometricRoundTripCreatesReviewOnlyCandidate() {
+        val tracker = PackagePaymentSequenceTracker()
+        val intent = tracker.observe(
+            "com.taobao.taobao",
+            listOf("好友代付", "确认付款", "￥23.50"),
+            1_000,
+            windowStateChanged = false,
+        )
+        assertTrue(intent.intent)
+        assertNull(intent.terminal)
+
+        assertNull(
+            tracker.observe(
+                "com.android.systemui",
+                emptyList(),
+                2_000,
+                windowStateChanged = true,
+            ).terminal
+        )
+        val returned = tracker.observe(
+            "com.taobao.taobao",
+            listOf("订单详情"),
+            3_000,
+            windowStateChanged = true,
+        ).terminal
+        assertEquals(2_350L, returned?.amountCents)
+        assertEquals("TAOBAO_BIOMETRIC_RETURN", returned?.terminalCode)
+        assertEquals(65, returned?.confidenceCap)
+    }
+
+    @Test
+    fun taobaoReturnWithoutExternalAuthIsNotCompletion() {
+        val tracker = PackagePaymentSequenceTracker()
+        tracker.observe("com.taobao.taobao", listOf("确认付款", "10.00元"), 1_000)
+        val returned = tracker.observe(
+            "com.taobao.taobao",
+            listOf("订单详情"),
+            2_000,
+            windowStateChanged = true,
+        )
+        assertNull(returned.terminal)
     }
 
     @Test

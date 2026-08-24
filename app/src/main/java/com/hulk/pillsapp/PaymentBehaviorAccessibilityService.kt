@@ -194,12 +194,17 @@ class PaymentBehaviorAccessibilityService : AccessibilityService() {
                 if (!submitted) warningWorkGate.cancel(workKey)
             }
         }
+        val packageSequence = packageSequenceTracker.observe(
+            packageName = packageName,
+            texts = texts,
+            nowMs = now,
+            windowStateChanged = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+        )
         if (!BehaviorTextClassifier.isSupportedBehaviorPackage(packageName)) {
             window.clear()
             windowPackageName = null
             return
         }
-        val packageSequence = packageSequenceTracker.observe(packageName, texts, now)
         val intent = packageSequence.intent || (
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
                 BehaviorTextClassifier.hasPaymentIntent(texts)

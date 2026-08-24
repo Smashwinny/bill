@@ -21,8 +21,8 @@ android {
         applicationId = "com.hulk.pillsapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 25
-        versionName = "1.10.0-m6-evidence-learning"
+        versionCode = 26
+        versionName = "1.10.1-m6-taobao-assisted-pay"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField(

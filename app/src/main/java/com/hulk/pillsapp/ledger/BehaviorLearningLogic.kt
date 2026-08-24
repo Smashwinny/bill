@@ -21,6 +21,7 @@ data class BehaviorTerminalMatch(
     val amountCents: Long?,
     val distinctAmountCount: Int,
     val terminalCode: String,
+    val confidenceCap: Int = 100,
 )
 
 data class BehaviorSignal(
@@ -310,6 +311,7 @@ object BehaviorTextClassifier {
         "com.eg.android.AlipayGphone",
         "com.tencent.mm",
         "com.tencent.mobileqq",
+        "com.taobao.taobao",
         "com.unionpay",
         "com.mipay.wallet",
         "cmb.pb",
@@ -386,7 +388,7 @@ object BehaviorTextClassifier {
             terminal.amountCents != null -> 82
             hadIntent -> 72
             else -> 60
-        }
+        }.coerceAtMost(terminal.confidenceCap)
         return BehaviorSignal(
             occurrenceId = emission.occurrenceId,
             clipId = clipId,
@@ -440,28 +442,51 @@ class PackagePaymentSequenceTracker {
         val packageName: String,
         val startedAtMs: Long,
         val amountCents: Long?,
+        val externalAuthSeen: Boolean = false,
     )
 
     private var pending: Pending? = null
 
-    fun observe(packageName: String, texts: List<String>, nowMs: Long): PackageSequenceMatch {
-        val supported = packageName == QQ_PACKAGE || packageName == WECHAT_PACKAGE
+    fun observe(
+        packageName: String,
+        texts: List<String>,
+        nowMs: Long,
+        windowStateChanged: Boolean = false,
+    ): PackageSequenceMatch {
+        val currentPending = pending
+        if (currentPending?.packageName == TAOBAO_PACKAGE &&
+            packageName in EXTERNAL_AUTH_PACKAGES &&
+            nowMs - currentPending.startedAtMs in 0..TAOBAO_SEQUENCE_WINDOW_MS
+        ) {
+            pending = currentPending.copy(externalAuthSeen = true)
+            return PackageSequenceMatch()
+        }
+        val supported = packageName == QQ_PACKAGE || packageName == WECHAT_PACKAGE ||
+            packageName == TAOBAO_PACKAGE
         if (!supported) {
-            if (pending?.packageName != packageName) pending = null
+            if (pending?.packageName != TAOBAO_PACKAGE) pending = null
             return PackageSequenceMatch()
         }
         val text = texts.joinToString(" ").take(2_048)
         val amount = BehaviorTextClassifier.singleAmount(texts)
-        val isIntent = RED_PACKET_INTENT.containsMatchIn(text)
+        val isTaobao = packageName == TAOBAO_PACKAGE
+        val isIntent = if (isTaobao) TAOBAO_PAYMENT_INTENT.containsMatchIn(text) else
+            RED_PACKET_INTENT.containsMatchIn(text)
         if (isIntent) pending = Pending(packageName, nowMs, amount)
+        val activeWindowMs = if (isTaobao) TAOBAO_SEQUENCE_WINDOW_MS else SEQUENCE_WINDOW_MS
         val current = pending?.takeIf {
-            it.packageName == packageName && nowMs - it.startedAtMs in 0..SEQUENCE_WINDOW_MS
+            it.packageName == packageName && nowMs - it.startedAtMs in 0..activeWindowMs
         }
         if (current != null && amount != null && current.amountCents == null) {
             pending = current.copy(amountCents = amount)
         }
-        if (!RED_PACKET_TERMINAL.containsMatchIn(text)) {
-            if (pending?.let { nowMs - it.startedAtMs > SEQUENCE_WINDOW_MS } == true) pending = null
+        val explicitTerminal = if (isTaobao) TAOBAO_PAYMENT_TERMINAL.containsMatchIn(text) else
+            RED_PACKET_TERMINAL.containsMatchIn(text)
+        val biometricReturn = isTaobao && current?.externalAuthSeen == true && windowStateChanged &&
+            !TAOBAO_PAYMENT_INTENT.containsMatchIn(text)
+        if (!explicitTerminal && !biometricReturn) {
+            val windowMs = if (isTaobao) TAOBAO_SEQUENCE_WINDOW_MS else SEQUENCE_WINDOW_MS
+            if (pending?.let { nowMs - it.startedAtMs > windowMs } == true) pending = null
             return PackageSequenceMatch(intent = isIntent)
         }
         val final = pending?.takeIf { it.packageName == packageName }
@@ -472,7 +497,13 @@ class PackagePaymentSequenceTracker {
                 kind = BehaviorKind.PAYMENT,
                 amountCents = amount ?: final?.amountCents,
                 distinctAmountCount = if (amount != null || final?.amountCents != null) 1 else 0,
-                terminalCode = if (packageName == QQ_PACKAGE) "QQ_RED_PACKET_SENT" else "WECHAT_RED_PACKET_SENT",
+                terminalCode = when {
+                    packageName == QQ_PACKAGE -> "QQ_RED_PACKET_SENT"
+                    packageName == WECHAT_PACKAGE -> "WECHAT_RED_PACKET_SENT"
+                    explicitTerminal -> "TAOBAO_PAYMENT_TERMINAL"
+                    else -> "TAOBAO_BIOMETRIC_RETURN"
+                },
+                confidenceCap = if (biometricReturn && !explicitTerminal) 65 else 100,
             ),
         )
     }
@@ -480,8 +511,17 @@ class PackagePaymentSequenceTracker {
     companion object {
         const val QQ_PACKAGE = "com.tencent.mobileqq"
         const val WECHAT_PACKAGE = "com.tencent.mm"
+        const val TAOBAO_PACKAGE = "com.taobao.taobao"
         private const val SEQUENCE_WINDOW_MS = 15_000L
+        private const val TAOBAO_SEQUENCE_WINDOW_MS = 45_000L
         private val RED_PACKET_INTENT = Regex("发红包|发送红包|塞钱进红包|确认发送|立即发送")
         private val RED_PACKET_TERMINAL = Regex("红包已发送|红包发送成功|已塞钱进红包|等待.{0,8}领取|对方.{0,8}领取")
+        private val TAOBAO_PAYMENT_INTENT = Regex("代付|帮.{0,6}付|立即付款|确认付款|提交付款|去付款|付款")
+        private val TAOBAO_PAYMENT_TERMINAL = Regex("代付成功|付款成功|支付成功|已付款|订单已支付|支付完成")
+        private val EXTERNAL_AUTH_PACKAGES = setOf(
+            "com.android.systemui",
+            "android",
+            "com.miui.securitycenter",
+        )
     }
 }
