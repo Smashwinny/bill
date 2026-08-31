@@ -6,6 +6,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.io.ByteArrayOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class ManualLedgerContractTest {
     @Test
@@ -76,6 +79,36 @@ class ManualLedgerContractTest {
         val result = SuishouCsvParser.parse(csv.toByteArray(java.nio.charset.Charset.forName("GB18030")))
         assertEquals("GB18030", result.sourceEncoding)
         assertEquals("餐饮", result.rows.single().category)
+    }
+
+    @Test
+    fun suishouXlsxReadsSharedStringsAndExcelDates() {
+        val shared = listOf("日期", "类型", "金额", "分类", "账户", "支出", "16.00", "红包", "QQ")
+        val sharedXml = "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">" +
+            shared.joinToString("") { "<si><t>$it</t></si>" } + "</sst>"
+        val styles = """<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+            <cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>"""
+        val sheet = """<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+            <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c><c r="E1" t="s"><v>4</v></c></row>
+            <row r="2"><c r="A2" s="1"><v>46265</v></c><c r="B2" t="s"><v>5</v></c><c r="C2" t="s"><v>6</v></c><c r="D2" t="s"><v>7</v></c><c r="E2" t="s"><v>8</v></c></row>
+            </sheetData></worksheet>"""
+        val output = ByteArrayOutputStream()
+        ZipOutputStream(output).use { zip ->
+            mapOf(
+                "[Content_Types].xml" to "<Types/>",
+                "xl/sharedStrings.xml" to sharedXml,
+                "xl/styles.xml" to styles,
+                "xl/worksheets/sheet1.xml" to sheet,
+            ).forEach { (name, value) ->
+                zip.putNextEntry(ZipEntry(name)); zip.write(value.toByteArray()); zip.closeEntry()
+            }
+        }
+        val result = SuishouImportParser.parse(output.toByteArray())
+        assertEquals("XLSX", result.sourceEncoding)
+        assertEquals(1, result.rows.size)
+        assertEquals("16.00", result.rows.single().amountText)
+        assertEquals("红包", result.rows.single().category)
+        assertEquals("QQ", result.rows.single().account)
     }
 
     @Test

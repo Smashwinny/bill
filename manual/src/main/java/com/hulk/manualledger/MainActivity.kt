@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.app.DatePickerDialog
 import android.content.Intent
 import android.content.ClipData
+import android.net.Uri
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
@@ -107,18 +108,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val importDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) executor.execute {
-            runCatching {
-                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    ?: error("无法读取文件")
-                require(bytes.size <= 50 * 1024 * 1024) { "文件超过 50 MiB" }
-                SuishouCsvParser.parse(bytes)
-            }.onSuccess { parsed ->
-                runOnUiThread { pendingImport = parsed }
-            }.onFailure { failure ->
-                runOnUiThread { message = "导入失败：${failure.message}" }
-            }
-        }
+        if (uri != null) previewImport(uri)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -134,7 +124,12 @@ class MainActivity : ComponentActivity() {
                         pendingCount = pendingCount,
                         message = message,
                         onSave = ::save,
-                        onImport = { importDocument.launch(arrayOf("text/csv", "text/plain")) },
+                        onImport = { importDocument.launch(arrayOf(
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.ms-excel",
+                            "text/csv",
+                            "text/plain",
+                        )) },
                         onExport = ::export,
                         onDirectMigration = ::migrateToAutomaticLedger,
                         onDelete = ::delete,
@@ -154,6 +149,13 @@ class MainActivity : ComponentActivity() {
         }
         executor.execute { refresh() }
         contentResolver.registerContentObserver(ManualLedgerProvider.TRANSACTIONS_URI, true, ledgerObserver)
+        handleImportIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleImportIntent(intent)
     }
 
     override fun onResume() {
@@ -165,6 +167,41 @@ class MainActivity : ComponentActivity() {
         contentResolver.unregisterContentObserver(ledgerObserver)
         executor.shutdown()
         super.onDestroy()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun handleImportIntent(incoming: Intent?) {
+        if (incoming?.action != Intent.ACTION_SEND) return
+        val uri = if (android.os.Build.VERSION.SDK_INT >= 33) {
+            incoming.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            incoming.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+        } ?: incoming.clipData?.getItemAt(0)?.uri
+        if (uri == null) {
+            message = "没有收到可读取的导出文件"
+            return
+        }
+        incoming.action = null
+        previewImport(uri)
+    }
+
+    private fun previewImport(uri: Uri) {
+        message = "正在读取随手记导出文件…"
+        executor.execute {
+            runCatching {
+                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: error("无法读取文件")
+                require(bytes.size <= 50 * 1024 * 1024) { "文件超过 50 MiB" }
+                SuishouImportParser.parse(bytes)
+            }.onSuccess { parsed ->
+                runOnUiThread {
+                    pendingImport = parsed
+                    message = "已读取 ${parsed.rows.size} 条，确认后才会写入本地"
+                }
+            }.onFailure { failure ->
+                runOnUiThread { message = "导入失败：${failure.message}" }
+            }
+        }
     }
 
     private fun save(input: NewManualTransaction) {
