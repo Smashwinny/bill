@@ -55,4 +55,12 @@ class ManualLedgerContractTest {
         assertFalse(exported.contains("endpoint"))
         assertFalse(exported.contains("token"))
     }
+
+    @Test
+    fun insightsProjectMonthAndCompareWithoutFloatingPointDrift() {
+        assertEquals(31000L, LedgerInsights.projectedExpense(10000, 10, 31))
+        assertEquals(25, LedgerInsights.monthChangePercent(12500, 10000))
+        assertEquals(-25, LedgerInsights.monthChangePercent(7500, 10000))
+        assertEquals(null, LedgerInsights.monthChangePercent(7500, 0))
+    }
 }

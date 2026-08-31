@@ -20,6 +20,22 @@ import java.util.UUID
 enum class ManualTransactionType { EXPENSE, INCOME, TRANSFER }
 enum class OutboxState { PENDING, SYNCED }
 
+object LedgerInsights {
+    fun projectedExpense(expenseCents: Long, elapsedDays: Int, monthDays: Int): Long {
+        if (expenseCents <= 0 || elapsedDays <= 0 || monthDays <= 0) return 0
+        return BigDecimal.valueOf(expenseCents).multiply(BigDecimal.valueOf(monthDays.toLong()))
+            .divide(BigDecimal.valueOf(elapsedDays.toLong()), 0, RoundingMode.DOWN)
+            .longValueExact()
+    }
+
+    fun monthChangePercent(currentCents: Long, previousCents: Long): Int? {
+        if (previousCents <= 0) return null
+        return BigDecimal.valueOf(currentCents - previousCents).multiply(BigDecimal.valueOf(100))
+            .divide(BigDecimal.valueOf(previousCents), 0, RoundingMode.DOWN)
+            .intValueExact()
+    }
+}
+
 @Entity(tableName = "manual_transaction")
 data class ManualTransactionEntity(
     @PrimaryKey val id: String,

@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
     private var pendingCount by mutableStateOf(0L)
     private var message by mutableStateOf("本地数据库已就绪")
     private var pendingImport by mutableStateOf<SuishouImportResult?>(null)
+    private var monthlyBudgetCents by mutableStateOf(0L)
     private var exportPayload: String? = null
 
     private val exportDocument = registerForActivityResult(
@@ -77,6 +78,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         repository = ManualLedgerRepository.open(this)
+        monthlyBudgetCents = getSharedPreferences("manual_settings", MODE_PRIVATE)
+            .getLong("monthly_budget_cents", 0L)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFFFFFDF8)) {
@@ -92,6 +95,8 @@ class MainActivity : ComponentActivity() {
                         pendingImport = pendingImport,
                         onConfirmImport = ::confirmImport,
                         onCancelImport = { pendingImport = null },
+                        monthlyBudgetCents = monthlyBudgetCents,
+                        onBudgetChange = ::saveMonthlyBudget,
                     )
                 }
             }
@@ -145,6 +150,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun saveMonthlyBudget(raw: String) {
+        val cents = if (raw.isBlank()) 0L else ManualLedgerRepository.parseCents(raw) ?: return
+        monthlyBudgetCents = cents
+        getSharedPreferences("manual_settings", MODE_PRIVATE).edit()
+            .putLong("monthly_budget_cents", cents)
+            .apply()
+        message = if (cents == 0L) "月预算已清除" else "月预算已保存到本机"
+    }
+
     private fun refresh(after: String? = null) {
         val latest = repository.list()
         val pending = repository.pendingSyncCount()
@@ -169,6 +183,8 @@ private fun ManualLedgerScreen(
     pendingImport: SuishouImportResult?,
     onConfirmImport: () -> Unit,
     onCancelImport: () -> Unit,
+    monthlyBudgetCents: Long,
+    onBudgetChange: (String) -> Unit,
 ) {
     var page by androidx.compose.runtime.remember { mutableStateOf(LedgerPage.RECORD) }
     var type by androidx.compose.runtime.remember { mutableStateOf(ManualTransactionType.EXPENSE) }
@@ -180,6 +196,11 @@ private fun ManualLedgerScreen(
     val monthRows = rows.filter { YearMonth.from(Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault())) == month }
     val expense = monthRows.filter { it.type == ManualTransactionType.EXPENSE }.sumOf { it.amountCents }
     val income = monthRows.filter { it.type == ManualTransactionType.INCOME }.sumOf { it.amountCents }
+    val previousMonth = month.minusMonths(1)
+    val previousExpense = rows.filter {
+        it.type == ManualTransactionType.EXPENSE &&
+            YearMonth.from(Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault())) == previousMonth
+    }.sumOf { it.amountCents }
     val recentCategories = (rows.asSequence().filter { it.type == type }.map { it.category } +
         defaultCategories(type).asSequence()).distinct().take(8).toList()
 
@@ -244,6 +265,9 @@ private fun ManualLedgerScreen(
                 rows = monthRows,
                 income = income,
                 expense = expense,
+                previousExpense = previousExpense,
+                monthlyBudgetCents = monthlyBudgetCents,
+                onBudgetChange = onBudgetChange,
                 onPreviousMonth = { month = month.minusMonths(1) },
                 onNextMonth = { if (month < YearMonth.now()) month = month.plusMonths(1) },
             )
@@ -405,6 +429,9 @@ private fun AnalysisPage(
     rows: List<ManualTransactionEntity>,
     income: Long,
     expense: Long,
+    previousExpense: Long,
+    monthlyBudgetCents: Long,
+    onBudgetChange: (String) -> Unit,
     onPreviousMonth: () -> Unit,
     onNextMonth: () -> Unit,
 ) {
@@ -413,6 +440,12 @@ private fun AnalysisPage(
         .entries.sortedByDescending { it.value }
     val activeDays = rows.map { Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault()).toLocalDate() }.distinct().size
     val daysElapsed = if (month == YearMonth.now()) LocalDate.now().dayOfMonth else month.lengthOfMonth()
+    val projectedExpense = if (month == YearMonth.now())
+        LedgerInsights.projectedExpense(expense, daysElapsed, month.lengthOfMonth()) else expense
+    val monthChange = LedgerInsights.monthChangePercent(expense, previousExpense)
+    var budgetText by androidx.compose.runtime.remember(monthlyBudgetCents) {
+        mutableStateOf(if (monthlyBudgetCents > 0) "%d.%02d".format(monthlyBudgetCents / 100, monthlyBudgetCents % 100) else "")
+    }
     Spacer(Modifier.height(8.dp))
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         TextButton(onClick = onPreviousMonth) { Text("‹ 上月") }
@@ -426,6 +459,43 @@ private fun AnalysisPage(
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
         SummaryCard("日均支出", money(expense / daysElapsed), Modifier.weight(1f))
         SummaryCard("记账天数", "$activeDays 天", Modifier.weight(1f))
+    }
+    Card(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text("月底预测", style = MaterialTheme.typography.bodySmall)
+            Text(money(projectedExpense), style = MaterialTheme.typography.titleLarge)
+            Text(
+                monthChange?.let { if (it >= 0) "比上月多 $it%" else "比上月少 ${-it}%" }
+                    ?: "上月暂无可比较支出",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+    Text("月预算", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
+    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = budgetText,
+            onValueChange = { budgetText = it.take(14) },
+            label = { Text("预算金额") },
+            prefix = { Text("¥ ") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(8.dp))
+        Button(
+            enabled = budgetText.isBlank() || ManualLedgerRepository.parseCents(budgetText) != null,
+            onClick = { onBudgetChange(budgetText) },
+        ) { Text("保存") }
+    }
+    if (monthlyBudgetCents > 0) {
+        val budgetRatio = (expense.toFloat() / monthlyBudgetCents).coerceIn(0f, 1f)
+        LinearProgressIndicator(progress = { budgetRatio }, modifier = Modifier.fillMaxWidth())
+        val remaining = monthlyBudgetCents - expense
+        Text(
+            if (remaining >= 0) "还可支出 ${money(remaining)} · 已用 ${(expense * 100 / monthlyBudgetCents)}%"
+            else "已超预算 ${money(-remaining)}",
+            color = if (remaining >= 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+        )
     }
     Text("支出分类", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
     if (grouped.isEmpty()) Text("本月还没有支出数据")
