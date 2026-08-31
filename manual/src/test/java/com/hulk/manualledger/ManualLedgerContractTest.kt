@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDateTime
+import java.time.ZoneId
 
 class ManualLedgerContractTest {
     @Test
@@ -62,5 +64,19 @@ class ManualLedgerContractTest {
         assertEquals(25, LedgerInsights.monthChangePercent(12500, 10000))
         assertEquals(-25, LedgerInsights.monthChangePercent(7500, 10000))
         assertEquals(null, LedgerInsights.monthChangePercent(7500, 0))
+    }
+
+    @Test
+    fun changingTransactionDatePreservesLocalTimeOfDay() {
+        val zone = ZoneId.systemDefault()
+        val original = LocalDateTime.of(2026, 8, 31, 7, 46, 12).atZone(zone).toInstant().toEpochMilli()
+        val changed = changeLocalDate(original, 2026, 7, 15)
+        val local = java.time.Instant.ofEpochMilli(changed).atZone(zone)
+        assertEquals(2026, local.year)
+        assertEquals(7, local.monthValue)
+        assertEquals(15, local.dayOfMonth)
+        assertEquals(7, local.hour)
+        assertEquals(46, local.minute)
+        assertEquals(12, local.second)
     }
 }

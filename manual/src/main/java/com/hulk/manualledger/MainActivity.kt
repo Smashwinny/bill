@@ -1,6 +1,7 @@
 package com.hulk.manualledger
 
 import android.os.Bundle
+import android.app.DatePickerDialog
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import java.time.Instant
@@ -192,6 +194,7 @@ private fun ManualLedgerScreen(
     var category by androidx.compose.runtime.remember { mutableStateOf("餐饮") }
     var account by androidx.compose.runtime.remember { mutableStateOf("现金") }
     var note by androidx.compose.runtime.remember { mutableStateOf("") }
+    var occurredAtMs by androidx.compose.runtime.remember { mutableStateOf(System.currentTimeMillis()) }
     var month by androidx.compose.runtime.remember { mutableStateOf(YearMonth.now()) }
     val monthRows = rows.filter { YearMonth.from(Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault())) == month }
     val expense = monthRows.filter { it.type == ManualTransactionType.EXPENSE }.sumOf { it.amountCents }
@@ -246,16 +249,26 @@ private fun ManualLedgerScreen(
                 category = category,
                 account = account,
                 note = note,
+                occurredAtMs = occurredAtMs,
                 categories = recentCategories,
                 onType = { type = it; category = defaultCategories(it).first() },
                 onAmount = { amount = it.take(14) },
                 onCategory = { category = it.take(40) },
                 onAccount = { account = it.take(40) },
                 onNote = { note = it.take(200) },
+                onOccurredAt = { occurredAtMs = it },
                 onSave = {
-                    onSave(NewManualTransaction(type = type, amountText = amount, category = category, account = account, note = note))
+                    onSave(NewManualTransaction(
+                        type = type,
+                        amountText = amount,
+                        category = category,
+                        account = account,
+                        occurredAtMs = occurredAtMs,
+                        note = note,
+                    ))
                     amount = ""
                     note = ""
+                    occurredAtMs = System.currentTimeMillis()
                     page = LedgerPage.FLOW
                 },
             )
@@ -284,12 +297,14 @@ private fun RecordPage(
     category: String,
     account: String,
     note: String,
+    occurredAtMs: Long,
     categories: List<String>,
     onType: (ManualTransactionType) -> Unit,
     onAmount: (String) -> Unit,
     onCategory: (String) -> Unit,
     onAccount: (String) -> Unit,
     onNote: (String) -> Unit,
+    onOccurredAt: (Long) -> Unit,
     onSave: () -> Unit,
 ) {
     Spacer(Modifier.height(8.dp))
@@ -311,6 +326,7 @@ private fun RecordPage(
     }
     OutlinedTextField(category, onCategory, label = { Text("分类（可直接新建）") }, modifier = Modifier.fillMaxWidth())
     OutlinedTextField(account, onAccount, label = { Text("账户") }, modifier = Modifier.fillMaxWidth())
+    TransactionDateButton(occurredAtMs, onOccurredAt)
     OutlinedTextField(note, onNote, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth())
     Button(
         onClick = onSave,
@@ -388,6 +404,7 @@ private fun EditTransactionDialog(
     var category by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.category) }
     var account by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.account) }
     var note by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.note.orEmpty()) }
+    var occurredAtMs by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.occurredAtMs) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("编辑流水") },
@@ -401,6 +418,7 @@ private fun EditTransactionDialog(
                 OutlinedTextField(amount, { amount = it.take(14) }, label = { Text("金额") }, singleLine = true)
                 OutlinedTextField(category, { category = it.take(40) }, label = { Text("分类") }, singleLine = true)
                 OutlinedTextField(account, { account = it.take(40) }, label = { Text("账户") }, singleLine = true)
+                TransactionDateButton(occurredAtMs) { occurredAtMs = it }
                 OutlinedTextField(note, { note = it.take(200) }, label = { Text("备注") })
             }
         },
@@ -413,7 +431,7 @@ private fun EditTransactionDialog(
                         amountText = amount,
                         category = category,
                         account = account,
-                        occurredAtMs = row.occurredAtMs,
+                        occurredAtMs = occurredAtMs,
                         note = note,
                     ))
                 },
@@ -421,6 +439,23 @@ private fun EditTransactionDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+@Composable
+private fun TransactionDateButton(valueMs: Long, onValueChange: (Long) -> Unit) {
+    val context = LocalContext.current
+    val date = Instant.ofEpochMilli(valueMs).atZone(ZoneId.systemDefault()).toLocalDate()
+    TextButton(
+        onClick = {
+            DatePickerDialog(
+                context,
+                { _, year, month, day -> onValueChange(changeLocalDate(valueMs, year, month + 1, day)) },
+                date.year,
+                date.monthValue - 1,
+                date.dayOfMonth,
+            ).show()
+        },
+    ) { Text("日期：${date.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))}  ›") }
 }
 
 @Composable
@@ -531,6 +566,11 @@ private fun defaultCategories(type: ManualTransactionType): List<String> = when 
 
 private val timeFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 private fun formatTime(ms: Long): String = Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).format(timeFormat)
+internal fun changeLocalDate(originalMs: Long, year: Int, month: Int, day: Int): Long {
+    val original = Instant.ofEpochMilli(originalMs).atZone(ZoneId.systemDefault())
+    return LocalDate.of(year, month, day).atTime(original.toLocalTime())
+        .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+}
 private fun money(cents: Long): String = "¥%d.%02d".format(cents / 100, kotlin.math.abs(cents % 100))
 private fun typeLabel(type: ManualTransactionType): String = when (type) {
     ManualTransactionType.EXPENSE -> "支出"
