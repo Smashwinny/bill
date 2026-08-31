@@ -25,6 +25,8 @@ ledger-server/deploy/.env
 
 # Generated outputs
 app/build/outputs/
+__pycache__/
+*.py[cod]
 
 # Project-local temporary artifacts
 /tmp/
