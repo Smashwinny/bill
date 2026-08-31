@@ -67,6 +67,9 @@ abstract class ManualLedgerDao {
 
     @Query("SELECT COUNT(*) FROM sync_outbox WHERE state = 'PENDING'")
     abstract fun pendingCount(): Long
+
+    @Query("DELETE FROM manual_transaction WHERE id = :id")
+    abstract fun deleteTransaction(id: String): Int
 }
 
 @Database(entities = [ManualTransactionEntity::class, SyncOutboxEntity::class], version = 1, exportSchema = true)
@@ -123,6 +126,22 @@ class ManualLedgerRepository(private val db: ManualLedgerDatabase) {
     fun list(): List<ManualTransactionEntity> = db.dao().listTransactions()
     fun pendingSyncCount(): Long = db.dao().pendingCount()
 
+    fun delete(id: String) {
+        val now = System.currentTimeMillis()
+        val event = SyncOutboxEntity(
+            eventId = UUID.randomUUID().toString(),
+            transactionId = id,
+            payload = "{\"schema\":\"${ManualLedgerMigrationCodec.SCHEMA}\",\"id\":\"${jsonId(id)}\",\"deleted\":true,\"updated_at_ms\":$now}",
+            state = OutboxState.PENDING,
+            attempts = 0,
+            nextAttemptAtMs = now,
+            createdAtMs = now,
+        )
+        db.runInTransaction {
+            if (db.dao().deleteTransaction(id) > 0) db.dao().insertOutbox(event)
+        }
+    }
+
     companion object {
         fun open(context: Context): ManualLedgerRepository {
             val db = Room.databaseBuilder(
@@ -137,6 +156,8 @@ class ManualLedgerRepository(private val db: ManualLedgerDatabase) {
             BigDecimal(raw.trim()).setScale(2, RoundingMode.UNNECESSARY)
                 .movePointRight(2).longValueExact().takeIf { it > 0 }
         }.getOrNull()
+
+        private fun jsonId(value: String): String = value.replace("\\", "\\\\").replace("\"", "\\\"")
     }
 }
 
