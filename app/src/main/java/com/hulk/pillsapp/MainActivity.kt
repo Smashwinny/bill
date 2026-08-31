@@ -1012,27 +1012,26 @@ private fun DebtDiscoverySection() {
 
 @Composable
 private fun AppHomeHeaderSection(state: ListenerStatusState) {
-    Text(text = "${stringResource(R.string.app_name_label)}：${stringResource(R.string.app_name)}")
-    Text(text = "${stringResource(R.string.version_name_label)}：${BuildConfig.VERSION_NAME}")
-    Text(text = "${stringResource(R.string.version_code_label)}：${BuildConfig.VERSION_CODE}")
-    Text(text = "${stringResource(R.string.build_time_label)}：${BuildConfig.BUILD_TIME}")
-    Text(text = stringResource(R.string.app_running_label))
-
-    Spacer(modifier = Modifier.height(16.dp))
-    Text(text = stringResource(R.string.notification_permission_label))
+    Text(text = "应用与通知监听", style = MaterialTheme.typography.titleLarge)
     Text(
-        text = stringResource(
-            R.string.notification_permission_status_format,
-            NotificationListenerState.permissionLabel(state.permissionEnabled),
-        )
+        text = "${BuildConfig.VERSION_NAME}（${BuildConfig.VERSION_CODE}）",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    Spacer(modifier = Modifier.height(8.dp))
-    Text(text = stringResource(R.string.notification_service_label))
     Text(
-        text = stringResource(
-            R.string.notification_service_connection_format,
-            NotificationListenerState.serviceConnectionLabel(state.isConnected),
-        )
+        text = "构建 ${BuildConfig.BUILD_TIME}",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        text = "通知读取授权：${NotificationListenerState.permissionLabel(state.permissionEnabled)}",
+        fontWeight = FontWeight.SemiBold,
+    )
+    Text(
+        text = "实时监听：${NotificationListenerState.serviceConnectionLabel(state.isConnected)}",
+        color = if (state.isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+        fontWeight = FontWeight.SemiBold,
     )
     Text(text = "${stringResource(R.string.notification_last_connected_label)}：${formatEventTime(state.lastConnectedAtMs)}")
     Text(text = "${stringResource(R.string.notification_last_disconnected_label)}：${formatEventTime(state.lastDisconnectedAtMs)}")
