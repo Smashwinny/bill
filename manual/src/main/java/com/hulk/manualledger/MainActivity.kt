@@ -88,6 +88,7 @@ class MainActivity : ComponentActivity() {
                         onImport = { importDocument.launch(arrayOf("text/csv", "text/plain")) },
                         onExport = ::export,
                         onDelete = ::delete,
+                        onEdit = ::edit,
                         pendingImport = pendingImport,
                         onConfirmImport = ::confirmImport,
                         onCancelImport = { pendingImport = null },
@@ -119,6 +120,14 @@ class MainActivity : ComponentActivity() {
             runCatching { repository.delete(id) }
                 .onSuccess { refresh("已删除；变更会在联网后同步") }
                 .onFailure { runOnUiThread { message = "删除失败：${it.message}" } }
+        }
+    }
+
+    private fun edit(id: String, input: NewManualTransaction) {
+        executor.execute {
+            runCatching { repository.update(id, input) }
+                .onSuccess { changed -> refresh(if (changed) "修改已保存到本地" else "流水不存在，未修改") }
+                .onFailure { runOnUiThread { message = "修改失败：${it.message}" } }
         }
     }
 
@@ -156,6 +165,7 @@ private fun ManualLedgerScreen(
     onImport: () -> Unit,
     onExport: () -> Unit,
     onDelete: (String) -> Unit,
+    onEdit: (String, NewManualTransaction) -> Unit,
     pendingImport: SuishouImportResult?,
     onConfirmImport: () -> Unit,
     onCancelImport: () -> Unit,
@@ -228,7 +238,7 @@ private fun ManualLedgerScreen(
                     page = LedgerPage.FLOW
                 },
             )
-            LedgerPage.FLOW -> FlowPage(rows, onImport, onExport, onDelete)
+            LedgerPage.FLOW -> FlowPage(rows, onImport, onExport, onDelete, onEdit)
             LedgerPage.ANALYSIS -> AnalysisPage(
                 month = month,
                 rows = monthRows,
@@ -292,22 +302,48 @@ private fun FlowPage(
     onImport: () -> Unit,
     onExport: () -> Unit,
     onDelete: (String) -> Unit,
+    onEdit: (String, NewManualTransaction) -> Unit,
 ) {
+    var query by androidx.compose.runtime.remember { mutableStateOf("") }
+    var editing by androidx.compose.runtime.remember { mutableStateOf<ManualTransactionEntity?>(null) }
+    val visibleRows = rows.filter { row ->
+        query.isBlank() || listOf(row.category, row.account, row.note.orEmpty(), money(row.amountCents))
+            .any { it.contains(query.trim(), ignoreCase = true) }
+    }
+    editing?.let { row ->
+        EditTransactionDialog(
+            row = row,
+            onDismiss = { editing = null },
+            onSave = { input -> onEdit(row.id, input); editing = null },
+        )
+    }
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         TextButton(onClick = onImport) { Text("导入随手记 CSV") }
         TextButton(onClick = onExport) { Text("迁移/备份") }
     }
+    OutlinedTextField(
+        value = query,
+        onValueChange = { query = it.take(50) },
+        label = { Text("搜索分类、账户、备注或金额") },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+    )
     if (rows.isEmpty()) {
         Text("还没有流水，去“记一笔”添加第一条吧。", modifier = Modifier.padding(top = 24.dp))
+    } else if (visibleRows.isEmpty()) {
+        Text("没有匹配“$query”的流水", modifier = Modifier.padding(top = 24.dp))
     } else LazyColumn(modifier = Modifier.fillMaxWidth()) {
-        items(rows, key = { it.id }) { row ->
+        items(visibleRows, key = { it.id }) { row ->
             Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Row(modifier = Modifier.padding(12.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(row.category, style = MaterialTheme.typography.titleMedium)
                         Text("${row.account} · ${formatTime(row.occurredAtMs)}", style = MaterialTheme.typography.bodySmall)
                         row.note?.let { Text(it) }
-                        TextButton(onClick = { onDelete(row.id) }) { Text("删除") }
+                        Row {
+                            TextButton(onClick = { editing = row }) { Text("编辑") }
+                            TextButton(onClick = { onDelete(row.id) }) { Text("删除") }
+                        }
                     }
                     Spacer(Modifier.width(8.dp))
                     Text((if (row.type == ManualTransactionType.EXPENSE) "−" else "+") + money(row.amountCents))
@@ -315,6 +351,52 @@ private fun FlowPage(
             }
         }
     }
+}
+
+@Composable
+private fun EditTransactionDialog(
+    row: ManualTransactionEntity,
+    onDismiss: () -> Unit,
+    onSave: (NewManualTransaction) -> Unit,
+) {
+    var type by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.type) }
+    var amount by androidx.compose.runtime.remember(row.id) { mutableStateOf("%d.%02d".format(row.amountCents / 100, row.amountCents % 100)) }
+    var category by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.category) }
+    var account by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.account) }
+    var note by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.note.orEmpty()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("编辑流水") },
+        text = {
+            Column {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ManualTransactionType.entries.forEach { option ->
+                        FilterChip(selected = type == option, onClick = { type = option }, label = { Text(typeLabel(option)) })
+                    }
+                }
+                OutlinedTextField(amount, { amount = it.take(14) }, label = { Text("金额") }, singleLine = true)
+                OutlinedTextField(category, { category = it.take(40) }, label = { Text("分类") }, singleLine = true)
+                OutlinedTextField(account, { account = it.take(40) }, label = { Text("账户") }, singleLine = true)
+                OutlinedTextField(note, { note = it.take(200) }, label = { Text("备注") })
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = ManualLedgerRepository.parseCents(amount) != null && category.isNotBlank() && account.isNotBlank(),
+                onClick = {
+                    onSave(NewManualTransaction(
+                        type = type,
+                        amountText = amount,
+                        category = category,
+                        account = account,
+                        occurredAtMs = row.occurredAtMs,
+                        note = note,
+                    ))
+                },
+            ) { Text("保存修改") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 @Composable

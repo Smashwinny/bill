@@ -11,6 +11,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.Update
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.Instant
@@ -70,6 +71,12 @@ abstract class ManualLedgerDao {
 
     @Query("DELETE FROM manual_transaction WHERE id = :id")
     abstract fun deleteTransaction(id: String): Int
+
+    @Query("SELECT * FROM manual_transaction WHERE id = :id LIMIT 1")
+    abstract fun findTransaction(id: String): ManualTransactionEntity?
+
+    @Update
+    abstract fun updateTransaction(entity: ManualTransactionEntity): Int
 }
 
 @Database(entities = [ManualTransactionEntity::class, SyncOutboxEntity::class], version = 1, exportSchema = true)
@@ -88,7 +95,7 @@ data class NewManualTransaction(
     val note: String? = null,
 )
 
-class ManualLedgerRepository(private val db: ManualLedgerDatabase) {
+class ManualLedgerRepository internal constructor(private val db: ManualLedgerDatabase) {
     fun add(input: NewManualTransaction): Boolean {
         val cents = parseCents(input.amountText) ?: error("金额格式错误")
         require(input.category.isNotBlank()) { "分类不能为空" }
@@ -142,6 +149,41 @@ class ManualLedgerRepository(private val db: ManualLedgerDatabase) {
         db.runInTransaction {
             if (db.dao().deleteTransaction(id) > 0) db.dao().insertOutbox(event)
         }
+    }
+
+    fun update(id: String, input: NewManualTransaction): Boolean {
+        val cents = parseCents(input.amountText) ?: error("金额格式错误")
+        require(input.category.isNotBlank()) { "分类不能为空" }
+        require(input.account.isNotBlank()) { "账户不能为空" }
+        val original = db.dao().findTransaction(id) ?: return false
+        val now = System.currentTimeMillis()
+        val updated = original.copy(
+            type = input.type,
+            amountCents = cents,
+            category = input.category.trim().take(40),
+            account = input.account.trim().take(40),
+            targetAccount = input.targetAccount?.trim()?.take(40)?.ifBlank { null },
+            occurredAtMs = input.occurredAtMs,
+            note = input.note?.trim()?.take(200)?.ifBlank { null },
+            updatedAtMs = now,
+        )
+        val event = SyncOutboxEntity(
+            eventId = UUID.randomUUID().toString(),
+            transactionId = id,
+            payload = ManualLedgerMigrationCodec.transactionJson(updated),
+            state = OutboxState.PENDING,
+            attempts = 0,
+            nextAttemptAtMs = now,
+            createdAtMs = now,
+        )
+        var changed = false
+        db.runInTransaction {
+            if (db.dao().updateTransaction(updated) > 0) {
+                db.dao().insertOutbox(event)
+                changed = true
+            }
+        }
+        return changed
     }
 
     companion object {
