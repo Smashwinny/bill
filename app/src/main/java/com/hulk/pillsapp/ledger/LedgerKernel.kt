@@ -143,6 +143,9 @@ object LedgerKernel {
     private val behaviorExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "behavior-ingest")
     }
+    private val manualSyncExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "manual-ledger-sync")
+    }
     /**
      * 无障碍暂停/恢复缺口必须严格有序，且不得排在通知 outbox 重放之后。
      * PREPARING 会话本身是崩溃后的耐久重试依据。
@@ -1289,6 +1292,20 @@ object LedgerKernel {
         }
     }
 
+    fun syncManualLedgerSnapshot(
+        rows: List<ManualLedgerImportRow>,
+        callback: (Result<ManualLedgerCommitResult>) -> Unit,
+    ) {
+        manualSyncExecutor.submit {
+            val result = runCatching {
+                requireDb().canonicalDao().importManualRows(rows, System.currentTimeMillis())
+            }
+            if (result.isFailure) result.exceptionOrNull()?.let(::recordAsyncFailure)
+            submitAsync { refreshStatusBlocking() }
+            callback(result)
+        }
+    }
+
     /**
      * 每次只提交一个 256 KiB 原文件块或至多 25 行，然后重新排到队尾。
      * 通知/SMS 的同步写入因此能插入批次之间，不会被十万行大事务饿死。
@@ -1398,7 +1415,7 @@ object LedgerKernel {
         )
         val snapshot = KernelStatus(
             observationCount = db.observationDao().countAll(),
-            candidateCount = db.canonicalDao().countAll(),
+            candidateCount = db.canonicalDao().countActive(),
             pendingParseCount = db.observationDao().countPendingParse(),
             openGapCount = db.coverageGapDao().countOpen(),
             openGaps = db.coverageGapDao().openGaps(),

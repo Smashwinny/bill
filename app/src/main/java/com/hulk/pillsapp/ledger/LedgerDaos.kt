@@ -359,47 +359,59 @@ abstract class CanonicalDao {
     @Query("SELECT COUNT(*) FROM canonical_transaction")
     abstract fun countAll(): Long
 
+    @Query("SELECT COUNT(*) FROM canonical_transaction WHERE status != 'DISCARDED'")
+    abstract fun countActive(): Long
+
     @Query("SELECT COUNT(*) FROM evidence_link WHERE observation_id = :observationId")
     abstract fun countEvidenceForObservation(observationId: Long): Long
+
+    @Query("SELECT * FROM canonical_transaction WHERE backfilled_from = 'MANUAL_LEDGER_V1'")
+    protected abstract fun listManualTransactions(): List<CanonicalTransactionEntity>
+
+    @Query("SELECT * FROM ledger_entry WHERE canonical_tx_id = :txId ORDER BY direction, account_id")
+    protected abstract fun ledgerEntriesFor(txId: Long): List<LedgerEntryEntity>
+
+    @Update
+    protected abstract fun updateManualTransaction(entity: CanonicalTransactionEntity): Int
+
+    @Query("DELETE FROM ledger_entry WHERE canonical_tx_id = :txId")
+    protected abstract fun deleteLedgerEntries(txId: Long): Int
 
     @Transaction
     open fun importManualRows(rows: List<ManualLedgerImportRow>, nowMs: Long): ManualLedgerCommitResult {
         var inserted = 0
         var duplicates = 0
+        var updated = 0
+        var discarded = 0
+        val incomingHashes = HashSet<String>(rows.size)
         rows.forEach { row ->
             val strongId = com.hulk.pillsapp.sha256Hex("MANUAL_LEDGER_V1:${row.id}")
-            if (findByStrongIdHash(strongId) != null) {
-                duplicates++
-                return@forEach
-            }
-            val txId = insertIgnore(
-                CanonicalTransactionEntity(
-                    strongIdHash = strongId,
-                    type = row.txType,
-                    status = TxStatus.SUCCESS,
-                    amountCents = row.amountCents,
-                    merchantHint = listOfNotNull(row.category, row.note).joinToString(" · ").take(160),
-                    occurredAtMs = row.occurredAtMs,
-                    backfilledFrom = "MANUAL_LEDGER_V1",
-                    createdAtMs = nowMs,
-                )
+            incomingHashes += strongId
+            val merchant = listOfNotNull(row.category, row.note).joinToString(" · ").take(160)
+            val desiredTx = CanonicalTransactionEntity(
+                strongIdHash = strongId,
+                type = row.txType,
+                status = TxStatus.SUCCESS,
+                amountCents = row.amountCents,
+                merchantHint = merchant,
+                occurredAtMs = row.occurredAtMs,
+                backfilledFrom = "MANUAL_LEDGER_V1",
+                createdAtMs = nowMs,
             )
-            if (txId == -1L) {
-                duplicates++
-                return@forEach
-            }
-            val direction = if (row.txType == TxType.INCOME) "CREDIT" else "DEBIT"
-            insertLedgerEntryIgnore(
-                LedgerEntryEntity(
+            val existing = findByStrongIdHash(strongId)
+            val txId = if (existing == null) {
+                insertIgnore(desiredTx).also { if (it != -1L) inserted++ }
+            } else existing.id
+            if (txId == -1L) { duplicates++; return@forEach }
+            val desiredEntries = buildList {
+                add(LedgerEntryEntity(
                     canonicalTxId = txId,
                     accountId = "manual:${row.account}",
-                    direction = direction,
+                    direction = if (row.txType == TxType.INCOME) "CREDIT" else "DEBIT",
                     amountCents = row.amountCents,
                     createdAtMs = nowMs,
-                )
-            )
-            if (row.txType == TxType.TRANSFER && !row.targetAccount.isNullOrBlank()) {
-                insertLedgerEntryIgnore(
+                ))
+                if (row.txType == TxType.TRANSFER && !row.targetAccount.isNullOrBlank()) add(
                     LedgerEntryEntity(
                         canonicalTxId = txId,
                         accountId = "manual:${row.targetAccount}",
@@ -409,9 +421,28 @@ abstract class CanonicalDao {
                     )
                 )
             }
-            inserted++
+            if (existing != null) {
+                val oldEntries = ledgerEntriesFor(txId)
+                val unchanged = existing.type == desiredTx.type && existing.status == TxStatus.SUCCESS &&
+                    existing.amountCents == desiredTx.amountCents && existing.merchantHint == merchant &&
+                    existing.occurredAtMs == desiredTx.occurredAtMs &&
+                    oldEntries.map { Triple(it.accountId, it.direction, it.amountCents) } ==
+                    desiredEntries.sortedWith(compareBy({ it.direction }, { it.accountId }))
+                        .map { Triple(it.accountId, it.direction, it.amountCents) }
+                if (unchanged) { duplicates++; return@forEach }
+                updateManualTransaction(desiredTx.copy(id = txId, createdAtMs = existing.createdAtMs))
+                deleteLedgerEntries(txId)
+                updated++
+            }
+            desiredEntries.forEach(::insertLedgerEntryIgnore)
         }
-        return ManualLedgerCommitResult(inserted, duplicates)
+        listManualTransactions().filter { it.strongIdHash !in incomingHashes && it.status != TxStatus.DISCARDED }
+            .forEach { existing ->
+                updateManualTransaction(existing.copy(status = TxStatus.DISCARDED))
+                deleteLedgerEntries(existing.id)
+                discarded++
+            }
+        return ManualLedgerCommitResult(inserted, duplicates, updated, discarded)
     }
 }
 

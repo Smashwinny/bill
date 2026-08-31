@@ -1,5 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="com.hulk.manualledger.permission.READ_LEDGER" />
+    <queries>
+        <provider android:authorities="com.hulk.manualledger.sync" />
+    </queries>
     <permission
         android:name="${applicationId}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
         tools:node="remove" />

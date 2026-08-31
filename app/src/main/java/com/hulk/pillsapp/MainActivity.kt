@@ -272,6 +272,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        ManualLedgerMigrationRepository.syncFromInstalledManualLedger(this)
         refreshState(this)
     }
 
@@ -1007,7 +1008,10 @@ private fun SourceCoverageAndImportSection(
             ) { Text("确认迁移") }
         }
         is ManualLedgerImportState.Imported -> {
-            Text(text = "迁移完成：新增 ${state.result.inserted} 条，重复跳过 ${state.result.duplicates} 条")
+            Text(
+                text = "本机账本已同步：新增 ${state.result.inserted} 条，更新 ${state.result.updated} 条，" +
+                    "未变化 ${state.result.duplicates} 条，移除 ${state.result.discarded} 条"
+            )
             TextButton(onClick = { ManualLedgerMigrationRepository.reset() }) { Text("完成") }
         }
     }

@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <permission
+        android:name="com.hulk.manualledger.permission.READ_LEDGER"
+        android:protectionLevel="signature" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
@@ -17,6 +20,11 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <provider
+            android:name=".ManualLedgerProvider"
+            android:authorities="com.hulk.manualledger.sync"
+            android:exported="true"
+            android:readPermission="com.hulk.manualledger.permission.READ_LEDGER" />
         <activity
             android:name=".MainActivity"
             android:exported="true">

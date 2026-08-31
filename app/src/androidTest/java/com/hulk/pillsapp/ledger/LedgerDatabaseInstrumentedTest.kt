@@ -167,6 +167,79 @@ class LedgerDatabaseInstrumentedTest {
     }
 
     @Test
+    fun manualLedgerSnapshotIsIdempotentAndMirrorsUpdatesDeletesAndRestore() {
+        val expense = ManualLedgerImportRow(
+            id = "manual-expense",
+            txType = TxType.PAYMENT,
+            amountCents = 1_600,
+            category = "餐饮",
+            account = "微信",
+            targetAccount = null,
+            occurredAtMs = 1_000,
+            note = "午餐",
+        )
+        val transfer = ManualLedgerImportRow(
+            id = "manual-transfer",
+            txType = TxType.TRANSFER,
+            amountCents = 2_000,
+            category = "转账",
+            account = "银行卡",
+            targetAccount = "支付宝",
+            occurredAtMs = 2_000,
+            note = null,
+        )
+
+        assertEquals(ManualLedgerCommitResult(inserted = 2, duplicates = 0),
+            db.canonicalDao().importManualRows(listOf(expense, transfer), 10_000))
+        assertEquals(ManualLedgerCommitResult(inserted = 0, duplicates = 2),
+            db.canonicalDao().importManualRows(listOf(expense, transfer), 11_000))
+
+        val changed = expense.copy(amountCents = 2_345, category = "聚餐", account = "现金")
+        assertEquals(ManualLedgerCommitResult(inserted = 0, duplicates = 0, updated = 1, discarded = 1),
+            db.canonicalDao().importManualRows(listOf(changed), 12_000))
+        assertEquals(1L, db.canonicalDao().countActive())
+        db.openHelper.readableDatabase.query(
+            "SELECT status, amount_cents, merchant_hint FROM canonical_transaction WHERE strong_id_hash = ?",
+            arrayOf(sha256Hex("MANUAL_LEDGER_V1:manual-expense")),
+        ).use {
+            assertTrue(it.moveToFirst())
+            assertEquals("SUCCESS", it.getString(0))
+            assertEquals(2_345L, it.getLong(1))
+            assertEquals("聚餐 · 午餐", it.getString(2))
+        }
+        db.openHelper.readableDatabase.query(
+            "SELECT account_id, direction, amount_cents FROM ledger_entry " +
+                "WHERE canonical_tx_id = (SELECT id FROM canonical_transaction WHERE strong_id_hash = ?)",
+            arrayOf(sha256Hex("MANUAL_LEDGER_V1:manual-expense")),
+        ).use {
+            assertTrue(it.moveToFirst())
+            assertEquals("manual:现金", it.getString(0))
+            assertEquals("DEBIT", it.getString(1))
+            assertEquals(2_345L, it.getLong(2))
+            assertFalse(it.moveToNext())
+        }
+        db.openHelper.readableDatabase.query(
+            "SELECT status FROM canonical_transaction WHERE strong_id_hash = ?",
+            arrayOf(sha256Hex("MANUAL_LEDGER_V1:manual-transfer")),
+        ).use {
+            assertTrue(it.moveToFirst())
+            assertEquals("DISCARDED", it.getString(0))
+        }
+
+        assertEquals(ManualLedgerCommitResult(inserted = 0, duplicates = 1, updated = 1, discarded = 0),
+            db.canonicalDao().importManualRows(listOf(changed, transfer), 13_000))
+        assertEquals(2L, db.canonicalDao().countActive())
+        db.openHelper.readableDatabase.query(
+            "SELECT COUNT(*) FROM ledger_entry WHERE canonical_tx_id = " +
+                "(SELECT id FROM canonical_transaction WHERE strong_id_hash = ?)",
+            arrayOf(sha256Hex("MANUAL_LEDGER_V1:manual-transfer")),
+        ).use {
+            assertTrue(it.moveToFirst())
+            assertEquals(2, it.getInt(0))
+        }
+    }
+
+    @Test
     fun legacyOpenGapStateIsNormalizedWithoutDeletingRows() {
         db.openHelper.writableDatabase.execSQL(
             "INSERT INTO coverage_gap(detector, started_at_ms, ended_at_ms, state, note) VALUES('legacy-active', 1000, NULL, 'OPEN', NULL)"
@@ -604,10 +677,10 @@ class LedgerDatabaseInstrumentedTest {
         val file = outbox.stage(observation)
         assertTrue(outbox.hasPending())
         assertFalse(file.readBytes().toString(Charsets.UTF_8).contains("支付成功"))
-        assertEquals(observation, outbox.pending().single().observation)
+        assertEquals(observation, outbox.pendingBatch(10).single().observation)
         outbox.complete(file)
         assertFalse(outbox.hasPending())
-        assertTrue(outbox.pending().isEmpty())
+        assertTrue(outbox.pendingBatch(10).isEmpty())
         directory.delete()
     }
 

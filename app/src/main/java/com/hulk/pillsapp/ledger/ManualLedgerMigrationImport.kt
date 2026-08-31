@@ -2,11 +2,14 @@ package com.hulk.pillsapp.ledger
 
 import android.content.Context
 import android.net.Uri
+import android.os.UserManager
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val MANUAL_LEDGER_SCHEMA = "manual-ledger-v1"
 private const val MAX_MANUAL_LEDGER_BYTES = 20 * 1024 * 1024
@@ -31,7 +34,12 @@ data class ManualLedgerPreview(
     val canImport: Boolean get() = rows.isNotEmpty() && invalidRows == 0 && error == null
 }
 
-data class ManualLedgerCommitResult(val inserted: Int, val duplicates: Int)
+data class ManualLedgerCommitResult(
+    val inserted: Int,
+    val duplicates: Int,
+    val updated: Int = 0,
+    val discarded: Int = 0,
+)
 
 object ManualLedgerMigrationParser {
     fun parse(bytes: ByteArray): ManualLedgerPreview {
@@ -96,6 +104,7 @@ sealed interface ManualLedgerImportState {
 
 object ManualLedgerMigrationRepository {
     private val executor = Executors.newSingleThreadExecutor { Thread(it, "manual-ledger-import") }
+    private val installedSyncInFlight = AtomicBoolean(false)
     private val _state = MutableStateFlow<ManualLedgerImportState>(ManualLedgerImportState.Idle)
     val state: StateFlow<ManualLedgerImportState> = _state.asStateFlow()
 
@@ -141,4 +150,83 @@ object ManualLedgerMigrationRepository {
     }
 
     fun reset() { if (_state.value !is ManualLedgerImportState.Importing) _state.value = ManualLedgerImportState.Idle }
+
+    fun syncFromInstalledManualLedger(context: Context) {
+        Log.i("ManualLedgerSync", "sync requested state=${_state.value::class.java.simpleName}")
+        if (_state.value is ManualLedgerImportState.Importing) return
+        val appContext = context.applicationContext
+        if (appContext.getSystemService(UserManager::class.java)?.isUserUnlocked == false) {
+            Log.i("ManualLedgerSync", "sync deferred: user storage is locked")
+            return
+        }
+        if (appContext.packageManager.resolveContentProvider("com.hulk.manualledger.sync", 0) == null) {
+            Log.i("ManualLedgerSync", "sync skipped: manual ledger provider is not installed")
+            return
+        }
+        if (!installedSyncInFlight.compareAndSet(false, true)) {
+            Log.i("ManualLedgerSync", "sync coalesced: request already in flight")
+            return
+        }
+        executor.submit {
+            val queryResult = runCatching {
+                appContext.contentResolver.query(
+                    Uri.parse("content://com.hulk.manualledger.sync/transactions"),
+                    null, null, null, null,
+                )?.use { cursor ->
+                    val result = ArrayList<ManualLedgerImportRow>(cursor.count)
+                    val id = cursor.getColumnIndexOrThrow("id")
+                    val type = cursor.getColumnIndexOrThrow("type")
+                    val amount = cursor.getColumnIndexOrThrow("amount_cents")
+                    val currency = cursor.getColumnIndexOrThrow("currency")
+                    val category = cursor.getColumnIndexOrThrow("category")
+                    val account = cursor.getColumnIndexOrThrow("account")
+                    val target = cursor.getColumnIndexOrThrow("target_account")
+                    val occurred = cursor.getColumnIndexOrThrow("occurred_at_ms")
+                    val note = cursor.getColumnIndexOrThrow("note")
+                    while (cursor.moveToNext()) {
+                        check(cursor.getString(currency) == "CNY")
+                        result += ManualLedgerImportRow(
+                            id = cursor.getString(id),
+                            txType = when (cursor.getString(type)) {
+                                "EXPENSE" -> TxType.PAYMENT
+                                "INCOME" -> TxType.INCOME
+                                "TRANSFER" -> TxType.TRANSFER
+                                else -> error("未知手工流水类型")
+                            },
+                            amountCents = cursor.getLong(amount).also { check(it > 0) },
+                            category = cursor.getString(category),
+                            account = cursor.getString(account),
+                            targetAccount = if (cursor.isNull(target)) null else cursor.getString(target),
+                            occurredAtMs = cursor.getLong(occurred),
+                            note = if (cursor.isNull(note)) null else cursor.getString(note),
+                        )
+                    }
+                    result
+                }
+            }
+            val rows = queryResult.getOrElse { failure ->
+                Log.w("ManualLedgerSync", "provider query failed", failure)
+                _state.value = ManualLedgerImportState.Failed("本机同步失败：${failure.message}")
+                installedSyncInFlight.set(false)
+                return@submit
+            } ?: run {
+                // 用户刚解锁或 Provider 进程正在重启时，系统可能短暂返回 null。
+                // 保持当前 UI 状态并等待下一次 onResume 重试，不向用户误报失败。
+                Log.i("ManualLedgerSync", "sync deferred: provider temporarily unavailable")
+                installedSyncInFlight.set(false)
+                return@submit
+            }
+            Log.i("ManualLedgerSync", "provider returned rows=${rows.size}")
+            LedgerKernel.syncManualLedgerSnapshot(rows) { result ->
+                result.onSuccess {
+                    Log.i("ManualLedgerSync", "snapshot rows=${rows.size} inserted=${it.inserted} updated=${it.updated} unchanged=${it.duplicates} discarded=${it.discarded}")
+                }.onFailure { Log.w("ManualLedgerSync", "snapshot commit failed", it) }
+                _state.value = result.fold(
+                    onSuccess = { ManualLedgerImportState.Imported(it) },
+                    onFailure = { ManualLedgerImportState.Failed("本机同步写入失败：${it.message}") },
+                )
+                installedSyncInFlight.set(false)
+            }
+        }
+    }
 }
