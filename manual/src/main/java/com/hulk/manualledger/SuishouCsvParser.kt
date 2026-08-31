@@ -20,14 +20,14 @@ object SuishouCsvParser {
     fun parse(content: String): SuishouImportResult {
         val lines = content.lineSequence().filter { it.isNotBlank() }.toList()
         if (lines.isEmpty()) return SuishouImportResult(emptyList(), 0)
-        val header = csvLine(lines.first()).map { it.trim() }
+        val header = csvLine(lines.first()).map { it.trim().removePrefix("\uFEFF") }
         fun index(vararg names: String): Int = header.indexOfFirst { cell ->
             names.any { it.equals(cell, ignoreCase = true) }
         }
         val dateIndex = index("日期", "时间", "交易时间")
         val typeIndex = index("类型", "收支类型", "交易类型")
         val amountIndex = index("金额", "交易金额")
-        val categoryIndex = index("分类", "类别", "支出分类", "收入分类")
+        val categoryIndex = index("分类", "类别", "支出分类", "收入分类", "项目")
         val accountIndex = index("账户", "付款账户", "资金账户")
         val noteIndex = index("备注", "说明", "商家")
         if (amountIndex < 0) return SuishouImportResult(emptyList(), lines.size - 1)
@@ -35,7 +35,7 @@ object SuishouCsvParser {
         val rows = lines.drop(1).mapNotNull { line ->
             val cells = csvLine(line)
             fun cell(at: Int): String = cells.getOrNull(at)?.trim().orEmpty()
-            val amount = cell(amountIndex)
+            val amount = normalizeAmount(cell(amountIndex))
             if (ManualLedgerRepository.parseCents(amount) == null) {
                 rejected++
                 return@mapNotNull null
@@ -62,6 +62,14 @@ object SuishouCsvParser {
             LocalDateTime.parse(raw, formatter).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
         }.getOrNull()
     }
+
+    private fun normalizeAmount(raw: String): String = raw
+        .replace("¥", "")
+        .replace("￥", "")
+        .replace(",", "")
+        .trim()
+        .removePrefix("+")
+        .removePrefix("-")
 
     internal fun csvLine(line: String): List<String> {
         val result = mutableListOf<String>()

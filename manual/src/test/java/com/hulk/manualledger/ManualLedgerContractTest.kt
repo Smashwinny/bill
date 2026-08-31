@@ -25,6 +25,17 @@ class ManualLedgerContractTest {
     }
 
     @Test
+    fun suishouCsvAcceptsBomCurrencyAndThousandsSeparator() {
+        val csv = "\uFEFF时间,收支类型,交易金额,项目,资金账户\n" +
+            "2026/8/31 9:08,收入,\"￥1,234.50\",工资,银行卡"
+        val result = SuishouCsvParser.parse(csv)
+        assertEquals(0, result.rejectedRows)
+        assertEquals("1234.50", result.rows.single().amountText)
+        assertEquals(ManualTransactionType.INCOME, result.rows.single().type)
+        assertEquals("工资", result.rows.single().category)
+    }
+
+    @Test
     fun migrationEnvelopeCarriesStableSchemaAndNoNetworkFields() {
         val row = ManualTransactionEntity(
             id = "stable-id",

@@ -89,7 +89,7 @@ data class NewManualTransaction(
 )
 
 class ManualLedgerRepository(private val db: ManualLedgerDatabase) {
-    fun add(input: NewManualTransaction): ManualTransactionEntity {
+    fun add(input: NewManualTransaction): Boolean {
         val cents = parseCents(input.amountText) ?: error("金额格式错误")
         require(input.category.isNotBlank()) { "分类不能为空" }
         require(input.account.isNotBlank()) { "账户不能为空" }
@@ -115,12 +115,14 @@ class ManualLedgerRepository(private val db: ManualLedgerDatabase) {
             nextAttemptAtMs = now,
             createdAtMs = now,
         )
+        var inserted = false
         db.runInTransaction {
             if (db.dao().insertTransactionIgnore(tx) != -1L) {
                 db.dao().insertOutbox(event)
+                inserted = true
             }
         }
-        return tx
+        return inserted
     }
 
     fun list(): List<ManualTransactionEntity> = db.dao().listTransactions()

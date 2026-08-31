@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -44,6 +45,7 @@ class MainActivity : ComponentActivity() {
     private var rows by mutableStateOf<List<ManualTransactionEntity>>(emptyList())
     private var pendingCount by mutableStateOf(0L)
     private var message by mutableStateOf("本地数据库已就绪")
+    private var pendingImport by mutableStateOf<SuishouImportResult?>(null)
     private var exportPayload: String? = null
 
     private val exportDocument = registerForActivityResult(
@@ -63,11 +65,9 @@ class MainActivity : ComponentActivity() {
             runCatching {
                 val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
                     ?: error("无法读取文件")
-                val parsed = SuishouCsvParser.parse(text)
-                parsed.rows.forEach(repository::add)
-                parsed
+                SuishouCsvParser.parse(text)
             }.onSuccess { parsed ->
-                refresh("导入 ${parsed.rows.size} 条，跳过 ${parsed.rejectedRows} 条")
+                runOnUiThread { pendingImport = parsed }
             }.onFailure { failure ->
                 runOnUiThread { message = "导入失败：${failure.message}" }
             }
@@ -88,6 +88,9 @@ class MainActivity : ComponentActivity() {
                         onImport = { importDocument.launch(arrayOf("text/csv", "text/plain")) },
                         onExport = ::export,
                         onDelete = ::delete,
+                        pendingImport = pendingImport,
+                        onConfirmImport = ::confirmImport,
+                        onCancelImport = { pendingImport = null },
                     )
                 }
             }
@@ -119,6 +122,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun confirmImport() {
+        val import = pendingImport ?: return
+        pendingImport = null
+        message = "正在导入到本地…"
+        executor.execute {
+            runCatching { import.rows.count { repository.add(it) } }
+                .onSuccess { inserted ->
+                    val duplicates = import.rows.size - inserted
+                    refresh("已导入 $inserted 条；重复 $duplicates 条；格式异常 ${import.rejectedRows} 条")
+                }
+                .onFailure { runOnUiThread { message = "导入失败：${it.message}" } }
+        }
+    }
+
     private fun refresh(after: String? = null) {
         val latest = repository.list()
         val pending = repository.pendingSyncCount()
@@ -139,6 +156,9 @@ private fun ManualLedgerScreen(
     onImport: () -> Unit,
     onExport: () -> Unit,
     onDelete: (String) -> Unit,
+    pendingImport: SuishouImportResult?,
+    onConfirmImport: () -> Unit,
+    onCancelImport: () -> Unit,
 ) {
     var page by androidx.compose.runtime.remember { mutableStateOf(LedgerPage.RECORD) }
     var type by androidx.compose.runtime.remember { mutableStateOf(ManualTransactionType.EXPENSE) }
@@ -146,12 +166,27 @@ private fun ManualLedgerScreen(
     var category by androidx.compose.runtime.remember { mutableStateOf("餐饮") }
     var account by androidx.compose.runtime.remember { mutableStateOf("现金") }
     var note by androidx.compose.runtime.remember { mutableStateOf("") }
-    val month = YearMonth.now()
+    var month by androidx.compose.runtime.remember { mutableStateOf(YearMonth.now()) }
     val monthRows = rows.filter { YearMonth.from(Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault())) == month }
     val expense = monthRows.filter { it.type == ManualTransactionType.EXPENSE }.sumOf { it.amountCents }
     val income = monthRows.filter { it.type == ManualTransactionType.INCOME }.sumOf { it.amountCents }
     val recentCategories = (rows.asSequence().filter { it.type == type }.map { it.category } +
         defaultCategories(type).asSequence()).distinct().take(8).toList()
+
+    pendingImport?.let { preview ->
+        val sample = preview.rows.take(3).joinToString("\n") {
+            "${typeLabel(it.type)} ${it.amountText} · ${it.category} · ${it.account}"
+        }
+        AlertDialog(
+            onDismissRequest = onCancelImport,
+            title = { Text("确认导入随手记数据") },
+            text = {
+                Text("可识别 ${preview.rows.size} 条，格式异常 ${preview.rejectedRows} 条。\n\n预览：\n$sample\n\n重复流水会按稳定编号自动跳过。")
+            },
+            confirmButton = { TextButton(onClick = onConfirmImport) { Text("确认导入") } },
+            dismissButton = { TextButton(onClick = onCancelImport) { Text("取消") } },
+        )
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -194,7 +229,14 @@ private fun ManualLedgerScreen(
                 },
             )
             LedgerPage.FLOW -> FlowPage(rows, onImport, onExport, onDelete)
-            LedgerPage.ANALYSIS -> AnalysisPage(monthRows, income, expense)
+            LedgerPage.ANALYSIS -> AnalysisPage(
+                month = month,
+                rows = monthRows,
+                income = income,
+                expense = expense,
+                onPreviousMonth = { month = month.minusMonths(1) },
+                onNextMonth = { if (month < YearMonth.now()) month = month.plusMonths(1) },
+            )
         }
     }
 }
@@ -276,13 +318,25 @@ private fun FlowPage(
 }
 
 @Composable
-private fun AnalysisPage(rows: List<ManualTransactionEntity>, income: Long, expense: Long) {
+private fun AnalysisPage(
+    month: YearMonth,
+    rows: List<ManualTransactionEntity>,
+    income: Long,
+    expense: Long,
+    onPreviousMonth: () -> Unit,
+    onNextMonth: () -> Unit,
+) {
     val expenses = rows.filter { it.type == ManualTransactionType.EXPENSE }
     val grouped = expenses.groupBy { it.category }.mapValues { entry -> entry.value.sumOf { it.amountCents } }
         .entries.sortedByDescending { it.value }
     val activeDays = rows.map { Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault()).toLocalDate() }.distinct().size
-    val daysElapsed = LocalDate.now().dayOfMonth.coerceAtLeast(1)
+    val daysElapsed = if (month == YearMonth.now()) LocalDate.now().dayOfMonth else month.lengthOfMonth()
     Spacer(Modifier.height(8.dp))
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        TextButton(onClick = onPreviousMonth) { Text("‹ 上月") }
+        Text("${month.year} 年 ${month.monthValue} 月", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
+        TextButton(onClick = onNextMonth, enabled = month < YearMonth.now()) { Text("下月 ›") }
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         SummaryCard("本月收入", money(income), Modifier.weight(1f))
         SummaryCard("本月支出", money(expense), Modifier.weight(1f))
