@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "PillsApp"
 include(":app")
-
+include(":manual")
