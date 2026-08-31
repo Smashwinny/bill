@@ -91,6 +91,8 @@ import com.hulk.pillsapp.ledger.StatementImportStatus
 import com.hulk.pillsapp.ledger.StatementImportUiState
 import com.hulk.pillsapp.ledger.StatementPreviewIssue
 import com.hulk.pillsapp.ledger.StatementSourceKind
+import com.hulk.pillsapp.ledger.ManualLedgerMigrationRepository
+import com.hulk.pillsapp.ledger.ManualLedgerImportState
 import com.hulk.pillsapp.ui.AutomaticLedgerTheme
 import com.hulk.pillsapp.ui.HomeHealthInput
 import com.hulk.pillsapp.ui.HomeHealthLevel
@@ -173,6 +175,12 @@ class MainActivity : ComponentActivity() {
         uri?.let { StatementImportRepository.preview(this, it) }
     }
 
+    private val manualLedgerFileLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { ManualLedgerMigrationRepository.preview(this, it) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         refreshState(this)
@@ -232,6 +240,9 @@ class MainActivity : ComponentActivity() {
                                     "application/octet-stream",
                                 )
                             )
+                        },
+                        onSelectManualLedgerFile = {
+                            manualLedgerFileLauncher.launch(arrayOf("application/json", "text/plain"))
                         },
                         onRefresh = {
                             refreshState(this@MainActivity)
@@ -314,6 +325,7 @@ private fun AppHome(
     onOpenAutostartSettings: () -> Unit,
     onRequestBatteryUnrestricted: () -> Unit,
     onSelectStatementFile: () -> Unit,
+    onSelectManualLedgerFile: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -419,7 +431,9 @@ private fun AppHome(
                             title = "用权威来源查漏补缺",
                             description = "通知和行为用于及时发现，账单与账户余额用于确认有没有漏记、多记或重复还款。",
                         )
-                        LedgerPanel { SourceCoverageAndImportSection(onSelectStatementFile) }
+                        LedgerPanel {
+                            SourceCoverageAndImportSection(onSelectStatementFile, onSelectManualLedgerFile)
+                        }
                         LedgerPanel { DebtDiscoverySection() }
                         LedgerPanel { KernelStatusSection() }
                     }
@@ -823,9 +837,13 @@ private val statementIssueLabels = mapOf(
 )
 
 @Composable
-private fun SourceCoverageAndImportSection(onSelectStatementFile: () -> Unit) {
+private fun SourceCoverageAndImportSection(
+    onSelectStatementFile: () -> Unit,
+    onSelectManualLedgerFile: () -> Unit,
+) {
     val status by LedgerKernel.status.collectAsState()
     val importState by StatementImportRepository.state.collectAsState()
+    val manualImportState by ManualLedgerMigrationRepository.state.collectAsState()
     var showAllImports by remember { mutableStateOf(false) }
     Spacer(modifier = Modifier.height(20.dp))
     Text(text = stringResource(R.string.m4_section_title))
@@ -932,6 +950,44 @@ private fun SourceCoverageAndImportSection(onSelectStatementFile: () -> Unit) {
                 onClick = { showAllImports = true },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(text = "展开其余 ${status.statementImports.size - visibleImports.size} 个解析批次") }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(20.dp))
+    Text(text = "手工账本迁移")
+    Text(text = "接收“本地账本”的 manual-ledger-v1 文件；用户手工确认的数据不会冒充官方账单。")
+    Button(
+        onClick = onSelectManualLedgerFile,
+        enabled = manualImportState !is ManualLedgerImportState.Importing,
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text(text = "选择本地账本迁移文件") }
+    when (val state = manualImportState) {
+        ManualLedgerImportState.Idle -> Text(text = "确认前只预览，不修改自动账本。")
+        ManualLedgerImportState.Reading -> Text(text = "正在读取迁移文件…")
+        ManualLedgerImportState.Importing -> Text(text = "正在写入加密账本…")
+        is ManualLedgerImportState.Failed -> {
+            Text(text = "无法迁移：${state.message}")
+            TextButton(onClick = { ManualLedgerMigrationRepository.reset() }) { Text("关闭") }
+        }
+        is ManualLedgerImportState.PreviewReady -> {
+            val preview = state.preview
+            Text(text = "可迁移 ${preview.rows.size} 条 · 异常 ${preview.invalidRows} 条")
+            preview.rows.take(3).forEach { row ->
+                Text(text = "${row.category} · ¥%d.%02d · ${formatEventTime(row.occurredAtMs)}".format(
+                    row.amountCents / 100,
+                    kotlin.math.abs(row.amountCents % 100),
+                ))
+            }
+            Text(text = "相同流水编号会自动跳过，重复选择不会重复记账。")
+            Button(
+                onClick = { ManualLedgerMigrationRepository.confirm() },
+                enabled = preview.canImport,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("确认迁移") }
+        }
+        is ManualLedgerImportState.Imported -> {
+            Text(text = "迁移完成：新增 ${state.result.inserted} 条，重复跳过 ${state.result.duplicates} 条")
+            TextButton(onClick = { ManualLedgerMigrationRepository.reset() }) { Text("完成") }
         }
     }
 }

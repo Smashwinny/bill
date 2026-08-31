@@ -1274,6 +1274,21 @@ object LedgerKernel {
         }
     }
 
+    fun commitManualLedgerPreview(
+        preview: ManualLedgerPreview,
+        callback: (Result<ManualLedgerCommitResult>) -> Unit,
+    ) {
+        executor.submit {
+            val result = runCatching {
+                check(preview.canImport) { "迁移预览未通过完整校验" }
+                requireDb().canonicalDao().importManualRows(preview.rows, System.currentTimeMillis())
+            }
+            if (result.isFailure) result.exceptionOrNull()?.let(::recordAsyncFailure)
+            refreshStatusBlocking()
+            callback(result)
+        }
+    }
+
     /**
      * 每次只提交一个 256 KiB 原文件块或至多 25 行，然后重新排到队尾。
      * 通知/SMS 的同步写入因此能插入批次之间，不会被十万行大事务饿死。

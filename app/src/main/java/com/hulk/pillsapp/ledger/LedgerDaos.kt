@@ -276,6 +276,9 @@ abstract class CanonicalDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     protected abstract fun insertEvidenceIgnore(link: EvidenceLinkEntity): Long
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    protected abstract fun insertLedgerEntryIgnore(entry: LedgerEntryEntity): Long
+
     @Query("SELECT * FROM canonical_transaction WHERE strong_id_hash = :hash LIMIT 1")
     abstract fun findByStrongIdHash(hash: String): CanonicalTransactionEntity?
 
@@ -358,6 +361,58 @@ abstract class CanonicalDao {
 
     @Query("SELECT COUNT(*) FROM evidence_link WHERE observation_id = :observationId")
     abstract fun countEvidenceForObservation(observationId: Long): Long
+
+    @Transaction
+    open fun importManualRows(rows: List<ManualLedgerImportRow>, nowMs: Long): ManualLedgerCommitResult {
+        var inserted = 0
+        var duplicates = 0
+        rows.forEach { row ->
+            val strongId = com.hulk.pillsapp.sha256Hex("MANUAL_LEDGER_V1:${row.id}")
+            if (findByStrongIdHash(strongId) != null) {
+                duplicates++
+                return@forEach
+            }
+            val txId = insertIgnore(
+                CanonicalTransactionEntity(
+                    strongIdHash = strongId,
+                    type = row.txType,
+                    status = TxStatus.SUCCESS,
+                    amountCents = row.amountCents,
+                    merchantHint = listOfNotNull(row.category, row.note).joinToString(" · ").take(160),
+                    occurredAtMs = row.occurredAtMs,
+                    backfilledFrom = "MANUAL_LEDGER_V1",
+                    createdAtMs = nowMs,
+                )
+            )
+            if (txId == -1L) {
+                duplicates++
+                return@forEach
+            }
+            val direction = if (row.txType == TxType.INCOME) "CREDIT" else "DEBIT"
+            insertLedgerEntryIgnore(
+                LedgerEntryEntity(
+                    canonicalTxId = txId,
+                    accountId = "manual:${row.account}",
+                    direction = direction,
+                    amountCents = row.amountCents,
+                    createdAtMs = nowMs,
+                )
+            )
+            if (row.txType == TxType.TRANSFER && !row.targetAccount.isNullOrBlank()) {
+                insertLedgerEntryIgnore(
+                    LedgerEntryEntity(
+                        canonicalTxId = txId,
+                        accountId = "manual:${row.targetAccount}",
+                        direction = "CREDIT",
+                        amountCents = row.amountCents,
+                        createdAtMs = nowMs,
+                    )
+                )
+            }
+            inserted++
+        }
+        return ManualLedgerCommitResult(inserted, duplicates)
+    }
 }
 
 data class BehaviorDashboardSnapshot(
