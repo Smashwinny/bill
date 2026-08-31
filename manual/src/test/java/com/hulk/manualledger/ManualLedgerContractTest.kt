@@ -38,6 +38,47 @@ class ManualLedgerContractTest {
     }
 
     @Test
+    fun suishouCsvSupportsSplitAmountsSubcategoryTransferAccountAndMultilineNotes() {
+        val csv = "日期,交易类型,支出金额,收入金额,一级分类,二级分类,账户1,账户2,备注\n" +
+            "2026-08-30,支出,25.60,,食品酒水,早餐,微信,,\"第一行\n第二行\"\n" +
+            "2026-08-31,转账,100.00,,资金往来,账户互转,银行卡,支付宝,调余额"
+        val result = SuishouCsvParser.parse(csv)
+        assertEquals(0, result.rejectedRows)
+        assertEquals(2, result.rows.size)
+        assertEquals("早餐", result.rows[0].category)
+        assertEquals("第一行\n第二行", result.rows[0].note)
+        assertEquals(ManualTransactionType.TRANSFER, result.rows[1].type)
+        assertEquals("支付宝", result.rows[1].targetAccount)
+    }
+
+    @Test
+    fun suishouCsvFallsBackToSplitAmountWhenGenericAmountIsBlank() {
+        val csv = "日期,类型,金额,支出金额,收入金额,分类,账户\n" +
+            "2026-08-30,支出,,25.60,,餐饮,微信\n" +
+            "2026-08-31,收入,,,88.00,红包,QQ"
+        val result = SuishouCsvParser.parse(csv)
+        assertEquals(0, result.rejectedRows)
+        assertEquals(listOf("25.60", "88.00"), result.rows.map { it.amountText })
+        assertEquals(ManualTransactionType.INCOME, result.rows[1].type)
+    }
+
+    @Test
+    fun suishouCsvRejectsUnknownHistoricalDateInsteadOfUsingToday() {
+        val result = SuishouCsvParser.parse("日期,类型,金额,分类,账户\n不是日期,支出,10.00,餐饮,现金")
+        assertTrue(result.rows.isEmpty())
+        assertEquals(1, result.rejectedRows)
+        assertTrue(result.rejectedReasons.single().contains("日期无法识别"))
+    }
+
+    @Test
+    fun suishouCsvDetectsGb18030() {
+        val csv = "日期,类型,金额,分类,账户\n2026-08-31,支出,16.00,餐饮,现金"
+        val result = SuishouCsvParser.parse(csv.toByteArray(java.nio.charset.Charset.forName("GB18030")))
+        assertEquals("GB18030", result.sourceEncoding)
+        assertEquals("餐饮", result.rows.single().category)
+    }
+
+    @Test
     fun migrationEnvelopeCarriesStableSchemaAndNoNetworkFields() {
         val row = ManualTransactionEntity(
             id = "stable-id",

@@ -9,7 +9,9 @@
     <application
         android:name=".ManualLedgerApp"
         android:allowBackup="true"
+        android:icon="@drawable/ic_launcher_art"
         android:label="本地账本"
+        android:roundIcon="@drawable/ic_launcher_art"
         android:theme="@style/Theme.ManualLedger">
         <provider
             android:name="androidx.core.content.FileProvider"

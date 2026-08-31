@@ -8,6 +8,7 @@ build/
 # Local properties
 local.properties
 secret.properties
+ledger-server/deploy/.env
 *.jks
 *.keystore
 **/release/

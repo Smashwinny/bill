@@ -4,31 +4,62 @@ import android.os.Bundle
 import android.app.DatePickerDialog
 import android.content.Intent
 import android.content.ClipData
+import android.database.ContentObserver
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.AddCircle
+import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.CloudQueue
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.automirrored.filled.ReceiptLong
+import androidx.compose.material.icons.filled.Savings
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,6 +67,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import java.time.Instant
 import java.time.LocalDate
@@ -54,6 +89,10 @@ class MainActivity : ComponentActivity() {
     private var pendingImport by mutableStateOf<SuishouImportResult?>(null)
     private var monthlyBudgetCents by mutableStateOf(0L)
     private var exportPayload: String? = null
+    private var syncStatus by mutableStateOf(ManualSyncStatus(false, "https://ledger.geniusqi.com/v1/sync", 0L, null))
+    private val ledgerObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) { executor.execute { refresh("云端流水已更新") } }
+    }
 
     private val exportDocument = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
@@ -70,9 +109,10 @@ class MainActivity : ComponentActivity() {
     private val importDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) executor.execute {
             runCatching {
-                val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
                     ?: error("无法读取文件")
-                SuishouCsvParser.parse(text)
+                require(bytes.size <= 50 * 1024 * 1024) { "文件超过 50 MiB" }
+                SuishouCsvParser.parse(bytes)
             }.onSuccess { parsed ->
                 runOnUiThread { pendingImport = parsed }
             }.onFailure { failure ->
@@ -87,8 +127,8 @@ class MainActivity : ComponentActivity() {
         monthlyBudgetCents = getSharedPreferences("manual_settings", MODE_PRIVATE)
             .getLong("monthly_budget_cents", 0L)
         setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFFFFFDF8)) {
+            MaterialTheme(colorScheme = LedgerColorScheme) {
+                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     ManualLedgerScreen(
                         rows = rows,
                         pendingCount = pendingCount,
@@ -104,18 +144,34 @@ class MainActivity : ComponentActivity() {
                         onCancelImport = { pendingImport = null },
                         monthlyBudgetCents = monthlyBudgetCents,
                         onBudgetChange = ::saveMonthlyBudget,
+                        syncStatus = syncStatus,
+                        onConfigureSync = ::configureSync,
+                        onDisconnectSync = ::disconnectSync,
+                        onSyncNow = { ManualSyncScheduler.syncNow(this) },
                     )
                 }
             }
         }
         executor.execute { refresh() }
+        contentResolver.registerContentObserver(ManualLedgerProvider.TRANSACTIONS_URI, true, ledgerObserver)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::repository.isInitialized) executor.execute { refresh() }
+    }
+
+    override fun onDestroy() {
+        contentResolver.unregisterContentObserver(ledgerObserver)
+        executor.shutdown()
+        super.onDestroy()
     }
 
     private fun save(input: NewManualTransaction) {
         message = "正在保存到本地…"
         executor.execute {
             runCatching { repository.add(input) }
-                .onSuccess { refresh("已保存到本地；同步将在网络可用时后台进行") }
+                .onSuccess { ManualSyncScheduler.syncNow(this); refresh("已保存到本地；同步将在网络可用时后台进行") }
                 .onFailure { runOnUiThread { message = it.message ?: "保存失败" } }
         }
     }
@@ -156,7 +212,7 @@ class MainActivity : ComponentActivity() {
     private fun delete(id: String) {
         executor.execute {
             runCatching { repository.delete(id) }
-                .onSuccess { refresh("已删除；变更会在联网后同步") }
+                .onSuccess { ManualSyncScheduler.syncNow(this); refresh("已删除；变更会在联网后同步") }
                 .onFailure { runOnUiThread { message = "删除失败：${it.message}" } }
         }
     }
@@ -164,7 +220,10 @@ class MainActivity : ComponentActivity() {
     private fun edit(id: String, input: NewManualTransaction) {
         executor.execute {
             runCatching { repository.update(id, input) }
-                .onSuccess { changed -> refresh(if (changed) "修改已保存到本地" else "流水不存在，未修改") }
+                .onSuccess { changed ->
+                    if (changed) ManualSyncScheduler.syncNow(this)
+                    refresh(if (changed) "修改已保存到本地" else "流水不存在，未修改")
+                }
                 .onFailure { runOnUiThread { message = "修改失败：${it.message}" } }
         }
     }
@@ -174,9 +233,10 @@ class MainActivity : ComponentActivity() {
         pendingImport = null
         message = "正在导入到本地…"
         executor.execute {
-            runCatching { import.rows.count { repository.add(it) } }
+            runCatching { repository.import(import.rows) }
                 .onSuccess { inserted ->
                     val duplicates = import.rows.size - inserted
+                    ManualSyncScheduler.syncNow(this)
                     refresh("已导入 $inserted 条；重复 $duplicates 条；格式异常 ${import.rejectedRows} 条")
                 }
                 .onFailure { runOnUiThread { message = "导入失败：${it.message}" } }
@@ -192,16 +252,46 @@ class MainActivity : ComponentActivity() {
         message = if (cents == 0L) "月预算已清除" else "月预算已保存到本机"
     }
 
+    private fun configureSync(endpoint: String, token: String) {
+        runCatching { ManualSyncSettings.configure(this, endpoint, token) }
+            .onSuccess { syncStatus = ManualSyncSettings.status(this); message = "云端同步已开启，正在上传本地流水" }
+            .onFailure { message = it.message ?: "同步配置失败" }
+    }
+
+    private fun disconnectSync() {
+        ManualSyncSettings.disconnect(this)
+        syncStatus = ManualSyncSettings.status(this)
+        message = "已断开云端；本地流水不受影响"
+    }
+
     private fun refresh(after: String? = null) {
         val latest = repository.list()
         val pending = repository.pendingSyncCount()
+        val latestSync = ManualSyncSettings.status(this)
         runOnUiThread {
             rows = latest
             pendingCount = pending
+            syncStatus = latestSync
             if (after != null) message = after
         }
     }
 }
+
+private val LedgerColorScheme = lightColorScheme(
+    primary = Color(0xFF0B705F),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFD7F4E8),
+    onPrimaryContainer = Color(0xFF06463C),
+    secondary = Color(0xFF4D635D),
+    secondaryContainer = Color(0xFFD7F4E8),
+    onSecondaryContainer = Color(0xFF06463C),
+    tertiary = Color(0xFFE59B24),
+    background = Color(0xFFF4F8F5),
+    surface = Color(0xFFFFFFFF),
+    surfaceVariant = Color(0xFFE7F0EC),
+    outline = Color(0xFFBBC9C3),
+    error = Color(0xFFB3261E),
+)
 
 @Composable
 private fun ManualLedgerScreen(
@@ -219,8 +309,12 @@ private fun ManualLedgerScreen(
     onCancelImport: () -> Unit,
     monthlyBudgetCents: Long,
     onBudgetChange: (String) -> Unit,
+    syncStatus: ManualSyncStatus,
+    onConfigureSync: (String, String) -> Unit,
+    onDisconnectSync: () -> Unit,
+    onSyncNow: () -> Unit,
 ) {
-    var page by androidx.compose.runtime.remember { mutableStateOf(LedgerPage.RECORD) }
+    var page by androidx.compose.runtime.remember { mutableStateOf(LedgerPage.OVERVIEW) }
     var type by androidx.compose.runtime.remember { mutableStateOf(ManualTransactionType.EXPENSE) }
     var amount by androidx.compose.runtime.remember { mutableStateOf("") }
     var category by androidx.compose.runtime.remember { mutableStateOf("餐饮") }
@@ -247,34 +341,51 @@ private fun ManualLedgerScreen(
             onDismissRequest = onCancelImport,
             title = { Text("确认导入随手记数据") },
             text = {
-                Text("可识别 ${preview.rows.size} 条，格式异常 ${preview.rejectedRows} 条。\n\n预览：\n$sample\n\n重复流水会按稳定编号自动跳过。")
+                val reasons = preview.rejectedReasons.joinToString("\n")
+                Text(
+                    "编码 ${preview.sourceEncoding} · 可识别 ${preview.rows.size} 条 · 拒绝 ${preview.rejectedRows} 条。" +
+                        (if (reasons.isBlank()) "" else "\n\n需要检查：\n$reasons") +
+                        "\n\n预览：\n$sample\n\n重复流水会按稳定编号自动跳过；日期不确定的流水不会写入。"
+                )
             },
             confirmButton = { TextButton(onClick = onConfirmImport) { Text("确认导入") } },
             dismissButton = { TextButton(onClick = onCancelImport) { Text("取消") } },
         )
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Column {
-                Text("本地账本", style = MaterialTheme.typography.headlineMedium)
-                Text("${month.monthValue} 月结余 ${money(income - expense)}")
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets.navigationBars,
+        bottomBar = {
+            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                LedgerPage.entries.forEach { option ->
+                    NavigationBarItem(
+                        selected = page == option,
+                        onClick = { page = option },
+                        icon = { Icon(option.icon, contentDescription = option.title) },
+                        label = { Text(option.title) },
+                    )
+                }
             }
-            Text(if (pendingCount == 0L) "✓ 本地安全保存" else "✓ 本地已存 · 云端待传 $pendingCount")
-        }
-        Text(message, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
-        Spacer(Modifier.height(8.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            LedgerPage.entries.forEach { option ->
-                FilterChip(
-                    modifier = Modifier.weight(1f),
-                    selected = page == option,
-                    onClick = { page = option },
-                    label = { Text(option.title) },
-                )
-            }
-        }
-        when (page) {
+        },
+    ) { scaffoldPadding ->
+        Column(
+            modifier = Modifier.fillMaxSize()
+                .padding(scaffoldPadding)
+                .padding(horizontal = 18.dp, vertical = 12.dp),
+        ) {
+            LedgerHeader(pendingCount = pendingCount, cloudConfigured = syncStatus.configured, message = message)
+            when (page) {
+            LedgerPage.OVERVIEW -> OverviewPage(
+                month = month,
+                rows = monthRows,
+                income = income,
+                expense = expense,
+                monthlyBudgetCents = monthlyBudgetCents,
+                onAdd = { page = LedgerPage.RECORD },
+                onAllFlows = { page = LedgerPage.FLOW },
+                onAnalysis = { page = LedgerPage.ANALYSIS },
+            )
             LedgerPage.RECORD -> RecordPage(
                 type = type,
                 amount = amount,
@@ -316,11 +427,178 @@ private fun ManualLedgerScreen(
                 onPreviousMonth = { month = month.minusMonths(1) },
                 onNextMonth = { if (month < YearMonth.now()) month = month.plusMonths(1) },
             )
+            LedgerPage.SETTINGS -> SyncSettingsPage(syncStatus, onConfigureSync, onDisconnectSync, onSyncNow)
+            }
         }
     }
 }
 
-private enum class LedgerPage(val title: String) { RECORD("记一笔"), FLOW("流水"), ANALYSIS("分析") }
+private enum class LedgerPage(val title: String, val icon: ImageVector) {
+    OVERVIEW("首页", Icons.Default.Home),
+    FLOW("流水", Icons.AutoMirrored.Filled.ReceiptLong),
+    RECORD("记一笔", Icons.Default.AddCircle),
+    ANALYSIS("分析", Icons.Default.Analytics),
+    SETTINGS("设置", Icons.Default.Settings),
+}
+
+@Composable
+private fun LedgerHeader(pendingCount: Long, cloudConfigured: Boolean, message: String) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Column {
+            Text("本地账本", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("每一笔，都稳稳留在自己手里", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+        }
+        Surface(
+            color = if (!cloudConfigured || pendingCount == 0L) MaterialTheme.colorScheme.primaryContainer else Color(0xFFFFEBC8),
+            shape = RoundedCornerShape(18.dp),
+        ) {
+            Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                Icon(
+                    if (!cloudConfigured) Icons.Default.AccountBalanceWallet else if (pendingCount == 0L) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = if (!cloudConfigured || pendingCount == 0L) MaterialTheme.colorScheme.primary else Color(0xFF9A6200),
+                )
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    if (!cloudConfigured) "仅本地" else if (pendingCount == 0L) "已同步" else "待同步 $pendingCount",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+    }
+    Text(message, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 5.dp, bottom = 8.dp))
+}
+
+@Composable
+private fun OverviewPage(
+    month: YearMonth,
+    rows: List<ManualTransactionEntity>,
+    income: Long,
+    expense: Long,
+    monthlyBudgetCents: Long,
+    onAdd: () -> Unit,
+    onAllFlows: () -> Unit,
+    onAnalysis: () -> Unit,
+) {
+    val grouped = rows.asSequence().filter { it.type == ManualTransactionType.EXPENSE }
+        .groupBy { it.category }.mapValues { (_, value) -> value.sumOf { it.amountCents } }
+        .entries.sortedByDescending { it.value }
+    val balance = income - expense
+    LazyColumn(modifier = Modifier.fillMaxWidth()) {
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B705F)),
+                shape = RoundedCornerShape(26.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(22.dp)) {
+                    Text("${month.monthValue} 月结余", color = Color(0xFFC8EFE4), style = MaterialTheme.typography.labelLarge)
+                    Text(money(balance), color = Color.White, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                    Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        MetricWithIcon(Icons.Default.ArrowDownward, "收入", money(income), Color(0xFFBFF5D4))
+                        MetricWithIcon(Icons.Default.ArrowUpward, "支出", money(expense), Color(0xFFFFD59C))
+                    }
+                }
+            }
+            Button(onClick = onAdd, modifier = Modifier.fillMaxWidth().padding(top = 12.dp), shape = RoundedCornerShape(16.dp)) {
+                Icon(Icons.Default.AddCircle, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("记一笔", fontWeight = FontWeight.Bold)
+            }
+        }
+        if (monthlyBudgetCents > 0) item {
+            val used = (expense.toFloat() / monthlyBudgetCents).coerceIn(0f, 1f)
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Row {
+                            Icon(Icons.Default.Savings, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
+                            Spacer(Modifier.width(7.dp))
+                            Text("本月预算", fontWeight = FontWeight.SemiBold)
+                        }
+                        Text("${(used * 100).toInt()}%")
+                    }
+                    LinearProgressIndicator(progress = { used }, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+                    Text(
+                        if (expense <= monthlyBudgetCents) "还可安心支出 ${money(monthlyBudgetCents - expense)}"
+                        else "已超预算 ${money(expense - monthlyBudgetCents)}",
+                        modifier = Modifier.padding(top = 7.dp),
+                        color = if (expense <= monthlyBudgetCents) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+        item {
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("支出去向", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                TextButton(onClick = onAnalysis) { Text("看分析") }
+            }
+            if (grouped.isEmpty()) EmptyHint("记下第一笔后，这里会自动长出消费结构")
+        }
+        items(grouped.take(3), key = { it.key }) { item ->
+            val ratio = if (expense == 0L) 0f else item.value.toFloat() / expense
+            CategoryProgress(item.key, item.value, ratio)
+        }
+        item {
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("最近流水", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                TextButton(onClick = onAllFlows) { Text("全部") }
+            }
+            if (rows.isEmpty()) EmptyHint("还没有流水，点“记一笔”开始你的新账本")
+        }
+        items(rows.take(4), key = { it.id }) { row -> TransactionRow(row) }
+        item { Spacer(Modifier.height(12.dp)) }
+    }
+}
+
+@Composable
+private fun MetricWithIcon(icon: ImageVector, label: String, value: String, tint: Color) {
+    Row {
+        Surface(shape = CircleShape, color = Color.White.copy(alpha = 0.13f)) {
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.padding(6.dp).size(18.dp))
+        }
+        Column(modifier = Modifier.padding(start = 8.dp)) {
+            Text(label, color = Color(0xFFC8EFE4), style = MaterialTheme.typography.bodySmall)
+            Text(value, color = Color.White, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun CategoryProgress(name: String, amount: Long, ratio: Float) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Surface(shape = CircleShape, color = categoryColor(name).copy(alpha = 0.16f)) {
+                Text(name.take(1), modifier = Modifier.padding(10.dp), color = categoryColor(name), fontWeight = FontWeight.Bold)
+            }
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(name, fontWeight = FontWeight.Medium)
+                    Text(money(amount), fontWeight = FontWeight.SemiBold)
+                }
+                LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth().padding(top = 7.dp), color = categoryColor(name))
+            }
+            Text("${(ratio * 100).toInt()}%", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
+        }
+    }
+}
+
+@Composable
+private fun EmptyHint(text: String) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), shape = RoundedCornerShape(18.dp)) {
+        Text(text, modifier = Modifier.fillMaxWidth().padding(18.dp), textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.secondary)
+    }
+}
 
 @Composable
 private fun RecordPage(
@@ -339,33 +617,72 @@ private fun RecordPage(
     onOccurredAt: (Long) -> Unit,
     onSave: () -> Unit,
 ) {
-    Spacer(Modifier.height(8.dp))
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        ManualTransactionType.entries.forEach { option ->
-            FilterChip(selected = type == option, onClick = { onType(option) }, label = { Text(typeLabel(option)) })
-        }
-    }
-    OutlinedTextField(amount, onAmount, label = { Text("金额") }, prefix = { Text("¥ ") }, modifier = Modifier.fillMaxWidth())
-    Text("常用分类", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 10.dp))
-    LazyColumn(modifier = Modifier.height(96.dp)) {
-        items(categories.chunked(4)) { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                row.forEach { item ->
-                    FilterChip(selected = category == item, onClick = { onCategory(item) }, label = { Text(item) })
+    LazyColumn(modifier = Modifier.fillMaxWidth()) {
+        item {
+            Text("记一笔", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ManualTransactionType.entries.forEach { option ->
+                    FilterChip(
+                        modifier = Modifier.weight(1f),
+                        selected = type == option,
+                        onClick = { onType(option) },
+                        label = { Text(typeLabel(option)) },
+                    )
                 }
             }
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(22.dp),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("金额", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
+                    OutlinedTextField(
+                        amount,
+                        onAmount,
+                        prefix = { Text("¥ ", style = MaterialTheme.typography.headlineSmall) },
+                        textStyle = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                        placeholder = { Text("0.00") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp),
+                    )
+                    Text("常用分类", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 14.dp))
+                    categories.chunked(4).forEach { row ->
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            row.forEach { item ->
+                                FilterChip(
+                                    modifier = Modifier.weight(1f),
+                                    selected = category == item,
+                                    onClick = { onCategory(item) },
+                                    label = { Text(item, maxLines = 1) },
+                                )
+                            }
+                            repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+                        }
+                    }
+                    OutlinedTextField(category, onCategory, label = { Text("分类（可直接新建）") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(
+                        account,
+                        onAccount,
+                        label = { Text("账户") },
+                        leadingIcon = { Icon(Icons.Default.AccountBalanceWallet, contentDescription = null) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    TransactionDateButton(occurredAtMs, onOccurredAt)
+                    OutlinedTextField(note, onNote, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth())
+                }
+            }
+            Button(
+                onClick = onSave,
+                enabled = ManualLedgerRepository.parseCents(amount) != null && category.isNotBlank() && account.isNotBlank(),
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                shape = RoundedCornerShape(16.dp),
+            ) { Text("保存到本机", fontWeight = FontWeight.Bold) }
+            Text("离线也能保存，网络恢复后自动同步", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.fillMaxWidth().padding(8.dp), textAlign = TextAlign.Center)
         }
     }
-    OutlinedTextField(category, onCategory, label = { Text("分类（可直接新建）") }, modifier = Modifier.fillMaxWidth())
-    OutlinedTextField(account, onAccount, label = { Text("账户") }, modifier = Modifier.fillMaxWidth())
-    TransactionDateButton(occurredAtMs, onOccurredAt)
-    OutlinedTextField(note, onNote, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth())
-    Button(
-        onClick = onSave,
-        enabled = ManualLedgerRepository.parseCents(amount) != null && category.isNotBlank() && account.isNotBlank(),
-        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-    ) { Text("保存到本机") }
-    Text("点击保存即完成，不等待网络", style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable
@@ -390,19 +707,20 @@ private fun FlowPage(
             onSave = { input -> onEdit(row.id, input); editing = null },
         )
     }
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        TextButton(onClick = onImport) { Text("导入随手记 CSV") }
-        TextButton(onClick = onExport) { Text("迁移/备份") }
-    }
-    Button(onClick = onDirectMigration, modifier = Modifier.fillMaxWidth()) {
-        Text("一键迁移到自动账本")
+    Text("全部流水", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        TextButton(onClick = onImport, modifier = Modifier.weight(1f)) { Text("导入随手记") }
+        TextButton(onClick = onExport, modifier = Modifier.weight(1f)) { Text("备份") }
+        TextButton(onClick = onDirectMigration, modifier = Modifier.weight(1f)) { Text("自动账本") }
     }
     OutlinedTextField(
         value = query,
         onValueChange = { query = it.take(50) },
-        label = { Text("搜索分类、账户、备注或金额") },
+        placeholder = { Text("搜索分类、账户、备注或金额") },
+        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
+        shape = RoundedCornerShape(18.dp),
     )
     if (rows.isEmpty()) {
         Text("还没有流水，去“记一笔”添加第一条吧。", modifier = Modifier.padding(top = 24.dp))
@@ -410,21 +728,40 @@ private fun FlowPage(
         Text("没有匹配“$query”的流水", modifier = Modifier.padding(top = 24.dp))
     } else LazyColumn(modifier = Modifier.fillMaxWidth()) {
         items(visibleRows, key = { it.id }) { row ->
-            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Row(modifier = Modifier.padding(12.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(row.category, style = MaterialTheme.typography.titleMedium)
-                        Text("${row.account} · ${formatTime(row.occurredAtMs)}", style = MaterialTheme.typography.bodySmall)
-                        row.note?.let { Text(it) }
-                        Row {
-                            TextButton(onClick = { editing = row }) { Text("编辑") }
-                            TextButton(onClick = { onDelete(row.id) }) { Text("删除") }
-                        }
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Text((if (row.type == ManualTransactionType.EXPENSE) "−" else "+") + money(row.amountCents))
+            TransactionRow(row, onEdit = { editing = row }, onDelete = { onDelete(row.id) })
+        }
+    }
+}
+
+@Composable
+private fun TransactionRow(
+    row: ManualTransactionEntity,
+    onEdit: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Row(modifier = Modifier.padding(14.dp).fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Surface(shape = CircleShape, color = categoryColor(row.category).copy(alpha = 0.16f)) {
+                Text(row.category.take(1), modifier = Modifier.padding(10.dp), color = categoryColor(row.category), fontWeight = FontWeight.Bold)
+            }
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text(row.category, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text("${row.account} · ${formatTime(row.occurredAtMs)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                row.note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                if (onEdit != null || onDelete != null) Row {
+                    onEdit?.let { TextButton(onClick = it) { Text("编辑") } }
+                    onDelete?.let { TextButton(onClick = it) { Text("删除", color = MaterialTheme.colorScheme.error) } }
                 }
             }
+            Text(
+                (if (row.type == ManualTransactionType.EXPENSE) "−" else "+") + money(row.amountCents),
+                fontWeight = FontWeight.Bold,
+                color = if (row.type == ManualTransactionType.EXPENSE) Color(0xFF2F3B37) else MaterialTheme.colorScheme.primary,
+            )
         }
     }
 }
@@ -492,6 +829,95 @@ private fun TransactionDateButton(valueMs: Long, onValueChange: (Long) -> Unit) 
             ).show()
         },
     ) { Text("日期：${date.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))}  ›") }
+}
+
+@Composable
+private fun SyncSettingsPage(
+    status: ManualSyncStatus,
+    onConfigure: (String, String) -> Unit,
+    onDisconnect: () -> Unit,
+    onSyncNow: () -> Unit,
+) {
+    var endpoint by androidx.compose.runtime.remember(status.endpoint) { mutableStateOf(status.endpoint) }
+    var token by androidx.compose.runtime.remember { mutableStateOf("") }
+    LazyColumn(modifier = Modifier.fillMaxWidth()) {
+        item {
+            Text("安全与同步", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (status.configured) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                ),
+                shape = RoundedCornerShape(22.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(18.dp)) {
+                    Icon(
+                        if (status.configured) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(32.dp),
+                    )
+                    Text(
+                        if (status.configured) "云端保护已开启" else "先存在本机，需要时再开启云端",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    Text(
+                        when {
+                            status.lastError != null -> "最近同步：${status.lastError}"
+                            status.lastSuccessAtMs > 0 -> "上次成功：${formatTime(status.lastSuccessAtMs)}"
+                            status.configured -> "配置完成，等待首次同步"
+                            else -> "没网也能正常记账；开启后自动补传，不需要手动盯着。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (status.lastError == null) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 5.dp),
+                    )
+                }
+            }
+            OutlinedTextField(
+                endpoint,
+                { endpoint = it.take(200) },
+                label = { Text("同步地址") },
+                modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                token,
+                { token = it.take(200) },
+                label = { Text(if (status.configured) "替换同步密钥" else "同步密钥") },
+                supportingText = { Text("密钥使用 Android Keystore 加密，只保存在这台手机") },
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            Button(
+                onClick = { onConfigure(endpoint, token); token = "" },
+                enabled = endpoint.startsWith("https://") && token.length >= 20,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Icon(Icons.Default.Sync, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(if (status.configured) "更新配置并同步" else "开启云端同步")
+            }
+            if (status.configured) {
+                TextButton(onClick = onSyncNow, modifier = Modifier.fillMaxWidth()) { Text("立即同步") }
+                TextButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth()) { Text("断开云端（不删除本地数据）") }
+            }
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("同步原则", fontWeight = FontWeight.Bold)
+                    Text("• 保存永远先写本地，不等待网络\n• 同一事件重复上传不会重复记账\n• 修改和删除也会同步\n• 服务器不可用时保留待传队列", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -598,6 +1024,14 @@ private fun defaultCategories(type: ManualTransactionType): List<String> = when 
     ManualTransactionType.EXPENSE -> listOf("餐饮", "交通", "购物", "居家", "娱乐", "医疗", "人情", "其他")
     ManualTransactionType.INCOME -> listOf("工资", "奖金", "兼职", "理财", "报销", "退款", "礼金", "其他")
     ManualTransactionType.TRANSFER -> listOf("账户互转", "还款", "借出", "收回", "其他")
+}
+
+private fun categoryColor(category: String): Color {
+    val palette = listOf(
+        Color(0xFF0B705F), Color(0xFFE18A26), Color(0xFF4D6FC4), Color(0xFF9A5CB4),
+        Color(0xFFCC5A71), Color(0xFF4A8B8A), Color(0xFF8B6A45), Color(0xFF65736D),
+    )
+    return palette[(category.hashCode() and Int.MAX_VALUE) % palette.size]
 }
 
 private val timeFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")

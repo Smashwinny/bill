@@ -11,6 +11,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.Transaction
 import androidx.room.Update
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -93,6 +94,17 @@ abstract class ManualLedgerDao {
 
     @Update
     abstract fun updateTransaction(entity: ManualTransactionEntity): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract fun upsertRemoteTransaction(entity: ManualTransactionEntity)
+
+    @Transaction
+    open fun applyRemoteChanges(changes: List<RemoteLedgerChange>) {
+        changes.forEach { change ->
+            if (change.deleted) deleteTransaction(change.transactionId)
+            else change.transaction?.let(::upsertRemoteTransaction)
+        }
+    }
 }
 
 @Database(entities = [ManualTransactionEntity::class, SyncOutboxEntity::class], version = 1, exportSchema = true)
@@ -113,10 +125,36 @@ data class NewManualTransaction(
 
 class ManualLedgerRepository internal constructor(private val db: ManualLedgerDatabase) {
     fun add(input: NewManualTransaction): Boolean {
+        val (tx, event) = prepare(input, System.currentTimeMillis())
+        var inserted = false
+        db.runInTransaction {
+            if (db.dao().insertTransactionIgnore(tx) != -1L) {
+                db.dao().insertOutbox(event)
+                inserted = true
+            }
+        }
+        return inserted
+    }
+
+    fun import(rows: List<NewManualTransaction>): Int {
+        var inserted = 0
+        val base = System.currentTimeMillis()
+        db.runInTransaction {
+            rows.forEachIndexed { index, input ->
+                val (tx, event) = prepare(input, base + index)
+                if (db.dao().insertTransactionIgnore(tx) != -1L) {
+                    db.dao().insertOutbox(event)
+                    inserted++
+                }
+            }
+        }
+        return inserted
+    }
+
+    private fun prepare(input: NewManualTransaction, now: Long): Pair<ManualTransactionEntity, SyncOutboxEntity> {
         val cents = parseCents(input.amountText) ?: error("金额格式错误")
         require(input.category.isNotBlank()) { "分类不能为空" }
         require(input.account.isNotBlank()) { "账户不能为空" }
-        val now = System.currentTimeMillis()
         val tx = ManualTransactionEntity(
             id = input.stableId ?: UUID.randomUUID().toString(),
             type = input.type,
@@ -138,14 +176,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             nextAttemptAtMs = now,
             createdAtMs = now,
         )
-        var inserted = false
-        db.runInTransaction {
-            if (db.dao().insertTransactionIgnore(tx) != -1L) {
-                db.dao().insertOutbox(event)
-                inserted = true
-            }
-        }
-        return inserted
+        return tx to event
     }
 
     fun list(): List<ManualTransactionEntity> = db.dao().listTransactions()

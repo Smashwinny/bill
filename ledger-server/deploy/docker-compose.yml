@@ -1,0 +1,17 @@
+services:
+  ledger-sync:
+    build: ..
+    restart: unless-stopped
+    environment:
+      LEDGER_SYNC_TOKEN: ${LEDGER_SYNC_TOKEN:?set LEDGER_SYNC_TOKEN in .env}
+    volumes:
+      - ledger-data:/data
+    ports:
+      - "127.0.0.1:8790:8790"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8790/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+volumes:
+  ledger-data:
