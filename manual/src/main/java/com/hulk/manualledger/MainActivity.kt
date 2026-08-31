@@ -2,9 +2,12 @@ package com.hulk.manualledger
 
 import android.os.Bundle
 import android.app.DatePickerDialog
+import android.content.Intent
+import android.content.ClipData
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -40,6 +43,7 @@ import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executors
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     private val executor = Executors.newSingleThreadExecutor()
@@ -92,6 +96,7 @@ class MainActivity : ComponentActivity() {
                         onSave = ::save,
                         onImport = { importDocument.launch(arrayOf("text/csv", "text/plain")) },
                         onExport = ::export,
+                        onDirectMigration = ::migrateToAutomaticLedger,
                         onDelete = ::delete,
                         onEdit = ::edit,
                         pendingImport = pendingImport,
@@ -119,6 +124,32 @@ class MainActivity : ComponentActivity() {
         executor.execute {
             exportPayload = ManualLedgerMigrationCodec.exportJson(repository.list())
             runOnUiThread { exportDocument.launch("manual-ledger-${System.currentTimeMillis()}.json") }
+        }
+    }
+
+    private fun migrateToAutomaticLedger() {
+        message = "正在准备迁移预览…"
+        executor.execute {
+            runCatching {
+                val directory = File(cacheDir, "migration").apply { mkdirs() }
+                val file = File(directory, "manual-ledger-v1.json")
+                file.writeText(ManualLedgerMigrationCodec.exportJson(repository.list()), Charsets.UTF_8)
+                val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+                Intent("com.hulk.pillsapp.IMPORT_MANUAL_LEDGER").apply {
+                    setClassName("com.hulk.pillsapp", "com.hulk.pillsapp.MainActivity")
+                    data = uri
+                    clipData = ClipData.newRawUri("manual-ledger-v1", uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            }.onSuccess { intent ->
+                runOnUiThread {
+                    runCatching { startActivity(intent) }
+                        .onSuccess { message = "已请求打开自动账本；若系统拦截，请允许应用间跳转" }
+                        .onFailure { message = "未找到自动账本，请先安装后再试" }
+                }
+            }.onFailure { failure ->
+                runOnUiThread { message = "迁移准备失败：${failure.message}" }
+            }
         }
     }
 
@@ -180,6 +211,7 @@ private fun ManualLedgerScreen(
     onSave: (NewManualTransaction) -> Unit,
     onImport: () -> Unit,
     onExport: () -> Unit,
+    onDirectMigration: () -> Unit,
     onDelete: (String) -> Unit,
     onEdit: (String, NewManualTransaction) -> Unit,
     pendingImport: SuishouImportResult?,
@@ -272,7 +304,7 @@ private fun ManualLedgerScreen(
                     page = LedgerPage.FLOW
                 },
             )
-            LedgerPage.FLOW -> FlowPage(rows, onImport, onExport, onDelete, onEdit)
+            LedgerPage.FLOW -> FlowPage(rows, onImport, onExport, onDirectMigration, onDelete, onEdit)
             LedgerPage.ANALYSIS -> AnalysisPage(
                 month = month,
                 rows = monthRows,
@@ -341,6 +373,7 @@ private fun FlowPage(
     rows: List<ManualTransactionEntity>,
     onImport: () -> Unit,
     onExport: () -> Unit,
+    onDirectMigration: () -> Unit,
     onDelete: (String) -> Unit,
     onEdit: (String, NewManualTransaction) -> Unit,
 ) {
@@ -360,6 +393,9 @@ private fun FlowPage(
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         TextButton(onClick = onImport) { Text("导入随手记 CSV") }
         TextButton(onClick = onExport) { Text("迁移/备份") }
+    }
+    Button(onClick = onDirectMigration, modifier = Modifier.fillMaxWidth()) {
+        Text("一键迁移到自动账本")
     }
     OutlinedTextField(
         value = query,

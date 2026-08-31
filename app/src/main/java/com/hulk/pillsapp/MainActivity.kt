@@ -153,6 +153,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val refreshTick = kotlinx.coroutines.flow.MutableStateFlow(0)
+    private val manualImportNavigationTick = kotlinx.coroutines.flow.MutableStateFlow(0)
 
     private val smsPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -183,13 +184,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleManualLedgerIntent(intent)
         refreshState(this)
         setContent {
             AutomaticLedgerTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val tick by refreshTick.collectAsState()
+                    val migrationTick by manualImportNavigationTick.collectAsState()
                     AppHome(
                         refreshTick = tick,
+                        manualImportNavigationTick = migrationTick,
                         onOpenAccessibilitySettings = {
                             permissionLauncher.launch(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                         },
@@ -251,6 +255,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleManualLedgerIntent(intent)
+    }
+
+    private fun handleManualLedgerIntent(intent: Intent?) {
+        if (intent?.action != "com.hulk.pillsapp.IMPORT_MANUAL_LEDGER") return
+        val uri = intent.data ?: return
+        ManualLedgerMigrationRepository.preview(this, uri)
+        manualImportNavigationTick.value += 1
     }
 
     override fun onResume() {
@@ -315,6 +332,7 @@ private enum class AppDestination(
 @Composable
 private fun AppHome(
     refreshTick: Int,
+    manualImportNavigationTick: Int,
     onOpenAccessibilitySettings: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onSafeLaunchSensitive: (String) -> Unit,
@@ -349,6 +367,9 @@ private fun AppHome(
     var destination by rememberSaveable { mutableStateOf(AppDestination.OVERVIEW) }
 
     LaunchedEffect(Unit) { onRefresh() }
+    LaunchedEffect(manualImportNavigationTick) {
+        if (manualImportNavigationTick > 0) destination = AppDestination.RECONCILE
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
