@@ -46,7 +46,6 @@ class LedgerStore:
             raise ValueError("cursor must be non-negative")
         if len(events) > MAX_EVENTS:
             raise ValueError(f"at most {MAX_EVENTS} events per request")
-        self.backup_once_daily()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             for event in events:
@@ -68,6 +67,7 @@ class LedgerStore:
                 (cursor, CHANGE_LIMIT + 1),
             ).fetchall()
             db.commit()
+        self.backup_once_daily()
         has_more = len(rows) > CHANGE_LIMIT
         visible = rows[:CHANGE_LIMIT]
         return {
