@@ -496,6 +496,7 @@ private fun ManualLedgerScreen(
             LedgerPage.OVERVIEW -> OverviewPage(
                 month = month,
                 rows = monthRows,
+                categoryNodes = categoryNodes,
                 income = income,
                 expense = expense,
                 monthlyBudgetCents = monthlyBudgetCents,
@@ -503,6 +504,7 @@ private fun ManualLedgerScreen(
                 onAllFlows = { page = LedgerPage.FLOW },
                 onAnalysis = { page = LedgerPage.ANALYSIS },
                 resolveCategory = ::resolveCategory,
+                onChangeTransactionCategory = onChangeTransactionCategory,
             )
             LedgerPage.RECORD -> RecordPage(
                 type = type,
@@ -601,6 +603,7 @@ private fun LedgerHeader(pendingCount: Long, cloudConfigured: Boolean, message: 
 private fun OverviewPage(
     month: YearMonth,
     rows: List<ManualTransactionEntity>,
+    categoryNodes: List<LedgerCategoryEntity>,
     income: Long,
     expense: Long,
     monthlyBudgetCents: Long,
@@ -608,7 +611,21 @@ private fun OverviewPage(
     onAllFlows: () -> Unit,
     onAnalysis: () -> Unit,
     resolveCategory: (ManualTransactionEntity) -> String,
+    onChangeTransactionCategory: (String, String) -> Unit,
 ) {
+    var changingCategory by remember { mutableStateOf<ManualTransactionEntity?>(null) }
+    changingCategory?.let { row ->
+        LeafCategoryDialog(
+            type = row.type,
+            categories = categoryNodes,
+            selectedId = row.categoryId,
+            onDismiss = { changingCategory = null },
+            onSelect = { categoryId ->
+                onChangeTransactionCategory(row.id, categoryId)
+                changingCategory = null
+            },
+        )
+    }
     val grouped = rows.asSequence().filter { it.type == ManualTransactionType.EXPENSE }
         .groupBy(resolveCategory).mapValues { (_, value) -> value.sumOf { it.amountCents } }
         .entries.sortedByDescending { it.value }
@@ -680,7 +697,9 @@ private fun OverviewPage(
             }
             if (rows.isEmpty()) EmptyHint("还没有流水，点“记一笔”开始你的新账本")
         }
-        items(rows.take(4), key = { it.id }) { row -> TransactionRow(row) }
+        items(rows.take(4), key = { it.id }) { row ->
+            TransactionRow(row, onChangeCategory = { changingCategory = row })
+        }
         item { Spacer(Modifier.height(12.dp)) }
     }
 }
