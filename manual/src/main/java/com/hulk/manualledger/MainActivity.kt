@@ -5,6 +5,8 @@ import android.app.DatePickerDialog
 import android.content.Intent
 import android.content.ClipData
 import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
@@ -321,8 +323,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun syncNowWithFeedback() {
-        message = if (pendingCount > 0) "正在同步，待处理 $pendingCount 条…" else "正在检查云端更新…"
+        val online = hasValidatedNetwork()
+        message = syncStartMessage(pendingCount, online)
         ManualSyncScheduler.syncNow(this)
+        if (!online) return
         fun scheduleFeedback(delayMs: Long) = Handler(Looper.getMainLooper()).postDelayed({
             if (::repository.isInitialized) executor.execute {
                 val pending = repository.pendingSyncCount()
@@ -337,6 +341,13 @@ class MainActivity : ComponentActivity() {
         }, delayMs)
         scheduleFeedback(1800)
         scheduleFeedback(6000)
+    }
+
+    private fun hasValidatedNetwork(): Boolean {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return false
+        val capabilities = manager.getNetworkCapabilities(manager.activeNetwork) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
     private fun moveCategory(sourceId: String, targetId: String?) = mutateCategories("分类已移动") {
@@ -1748,6 +1759,12 @@ internal fun changeLocalDate(originalMs: Long, year: Int, month: Int, day: Int):
     val original = Instant.ofEpochMilli(originalMs).atZone(ZoneId.systemDefault())
     return LocalDate.of(year, month, day).atTime(original.toLocalTime())
         .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+}
+internal fun syncStartMessage(pendingCount: Long, online: Boolean): String = when {
+    !online && pendingCount > 0 -> "当前无网络，$pendingCount 条流水已排队，联网后自动同步"
+    !online -> "当前无网络，已排队等待联网后检查云端更新"
+    pendingCount > 0 -> "正在同步，待处理 $pendingCount 条…"
+    else -> "正在检查云端更新…"
 }
 private fun money(cents: Long): String = "¥%d.%02d".format(cents / 100, kotlin.math.abs(cents % 100))
 private fun typeLabel(type: ManualTransactionType): String = when (type) {

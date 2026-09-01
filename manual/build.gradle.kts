@@ -12,8 +12,8 @@ android {
         applicationId = "com.hulk.manualledger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 15
-        versionName = "0.6.6-click-any-visible-bill"
+        versionCode = 16
+        versionName = "0.6.7-explicit-sync-feedback"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

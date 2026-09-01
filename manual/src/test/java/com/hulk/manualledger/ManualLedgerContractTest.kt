@@ -200,4 +200,12 @@ class ManualLedgerContractTest {
         assertEquals(46, local.minute)
         assertEquals(12, local.second)
     }
+
+    @Test
+    fun syncButtonExplainsOfflineQueueAndOnlineWork() {
+        assertEquals("当前无网络，3 条流水已排队，联网后自动同步", syncStartMessage(3, online = false))
+        assertEquals("当前无网络，已排队等待联网后检查云端更新", syncStartMessage(0, online = false))
+        assertEquals("正在同步，待处理 3 条…", syncStartMessage(3, online = true))
+        assertEquals("正在检查云端更新…", syncStartMessage(0, online = true))
+    }
 }
