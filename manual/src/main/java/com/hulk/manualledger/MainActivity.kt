@@ -365,7 +365,7 @@ private fun ManualLedgerScreen(
     var page by androidx.compose.runtime.remember { mutableStateOf(LedgerPage.OVERVIEW) }
     var type by androidx.compose.runtime.remember { mutableStateOf(ManualTransactionType.EXPENSE) }
     var amount by androidx.compose.runtime.remember { mutableStateOf("") }
-    var category by androidx.compose.runtime.remember { mutableStateOf("餐饮") }
+    var category by androidx.compose.runtime.remember { mutableStateOf(CategoryCatalog.defaultPath(ManualTransactionType.EXPENSE)) }
     var account by androidx.compose.runtime.remember { mutableStateOf("现金") }
     var note by androidx.compose.runtime.remember { mutableStateOf("") }
     var occurredAtMs by androidx.compose.runtime.remember { mutableStateOf(System.currentTimeMillis()) }
@@ -440,8 +440,7 @@ private fun ManualLedgerScreen(
                 account = account,
                 note = note,
                 occurredAtMs = occurredAtMs,
-                categories = CategoryCatalog.defaults(type),
-                onType = { type = it; category = CategoryCatalog.defaults(it).first() },
+                onType = { type = it; category = CategoryCatalog.defaultPath(it) },
                 onAmount = { amount = it.take(14) },
                 onCategory = { category = it.take(40) },
                 onAccount = { account = it.take(40) },
@@ -659,7 +658,6 @@ private fun RecordPage(
     account: String,
     note: String,
     occurredAtMs: Long,
-    categories: List<String>,
     onType: (ManualTransactionType) -> Unit,
     onAmount: (String) -> Unit,
     onCategory: (String) -> Unit,
@@ -699,7 +697,7 @@ private fun RecordPage(
                         shape = RoundedCornerShape(16.dp),
                     )
                     Text("消费分类", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 14.dp))
-                    CategoryPicker(type, category, categories, onCategory)
+                    HierarchicalCategoryPicker(type, category, onCategory)
                     OutlinedTextField(
                         account,
                         onAccount,
@@ -825,13 +823,13 @@ private fun EditTransactionDialog(
                     ManualTransactionType.entries.forEach { option ->
                         FilterChip(
                             selected = type == option,
-                            onClick = { type = option; category = CategoryCatalog.defaults(option).first() },
+                            onClick = { type = option; category = CategoryCatalog.defaultPath(option) },
                             label = { Text(typeLabel(option)) },
                         )
                     }
                 }
                 OutlinedTextField(amount, { amount = it.take(14) }, label = { Text("金额") }, singleLine = true)
-                CategoryPicker(type, category, CategoryCatalog.defaults(type)) { category = it }
+                HierarchicalCategoryPicker(type, category) { category = it }
                 OutlinedTextField(account, { account = it.take(40) }, label = { Text("账户") }, singleLine = true)
                 TransactionDateButton(occurredAtMs) { occurredAtMs = it }
                 OutlinedTextField(note, { note = it.take(200) }, label = { Text("备注") })
@@ -853,6 +851,77 @@ private fun EditTransactionDialog(
             ) { Text("保存修改") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun HierarchicalCategoryPicker(
+    type: ManualTransactionType,
+    selected: String,
+    onSelected: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val hierarchy = CategoryCatalog.hierarchyOptions(type)
+    val parsed = CategoryCatalog.hierarchy(selected)
+    val selectedPrimary = when {
+        parsed.first in hierarchy -> parsed.first
+        type == ManualTransactionType.EXPENSE -> CategoryCatalog.normalize(type, selected).takeIf { it in hierarchy } ?: hierarchy.keys.first()
+        else -> parsed.first.takeIf { it in hierarchy } ?: hierarchy.keys.first()
+    }
+    val customKey = "custom_subcategories_${type.name.lowercase()}_$selectedPrimary"
+    var customChildren by androidx.compose.runtime.remember(type, selectedPrimary) {
+        mutableStateOf(context.getSharedPreferences("manual_settings", android.content.Context.MODE_PRIVATE)
+            .getStringSet(customKey, emptySet()).orEmpty().toSet())
+    }
+    val children = (hierarchy.getValue(selectedPrimary) + customChildren).distinct()
+    val selectedSecondary = parsed.second ?: parsed.first.takeIf { it in children } ?: children.first()
+    var adding by androidx.compose.runtime.remember(type, selectedPrimary) { mutableStateOf(false) }
+    var draft by androidx.compose.runtime.remember(type, selectedPrimary) { mutableStateOf("") }
+
+    Text("一级分类", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+    hierarchy.keys.chunked(4).forEach { row ->
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            row.forEach { primary ->
+                FilterChip(
+                    modifier = Modifier.weight(1f),
+                    selected = selectedPrimary == primary,
+                    onClick = { onSelected(CategoryCatalog.sourcePath(primary, hierarchy.getValue(primary).first())) },
+                    label = { Text(primary, maxLines = 1) },
+                )
+            }
+            repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+        }
+    }
+    Text("二级分类 · $selectedPrimary", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+    children.chunked(4).forEach { row ->
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            row.forEach { secondary ->
+                FilterChip(
+                    modifier = Modifier.weight(1f),
+                    selected = selectedSecondary == secondary,
+                    onClick = { onSelected(CategoryCatalog.sourcePath(selectedPrimary, secondary)) },
+                    label = { Text(secondary, maxLines = 1) },
+                )
+            }
+            repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+        }
+    }
+    TextButton(onClick = { draft = ""; adding = true }) { Text("＋ 在“$selectedPrimary”下添加二级分类") }
+    if (adding) AlertDialog(
+        onDismissRequest = { adding = false },
+        title = { Text("添加到“$selectedPrimary”") },
+        text = { OutlinedTextField(draft, { draft = it.take(40) }, label = { Text("二级分类名称") }, singleLine = true) },
+        confirmButton = {
+            TextButton(enabled = draft.isNotBlank(), onClick = {
+                val child = draft.trim()
+                customChildren = customChildren + child
+                context.getSharedPreferences("manual_settings", android.content.Context.MODE_PRIVATE)
+                    .edit().putStringSet(customKey, customChildren).apply()
+                onSelected(CategoryCatalog.sourcePath(selectedPrimary, child))
+                adding = false
+            }) { Text("添加并使用") }
+        },
+        dismissButton = { TextButton(onClick = { adding = false }) { Text("取消") } },
     )
 }
 

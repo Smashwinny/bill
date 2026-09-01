@@ -150,9 +150,12 @@ class ManualLedgerContractTest {
     @Test
     fun categoryCatalogGuidesAliasesButKeepsGenuineCustomCategories() {
         assertEquals("宠物", CategoryCatalog.normalize(ManualTransactionType.EXPENSE, "小猫"))
-        assertEquals("餐饮", CategoryCatalog.normalize(ManualTransactionType.EXPENSE, "外卖"))
+        assertEquals("饮食", CategoryCatalog.normalize(ManualTransactionType.EXPENSE, "外卖"))
         assertEquals("摄影", CategoryCatalog.normalize(ManualTransactionType.EXPENSE, "摄影"))
         assertTrue("宠物" in CategoryCatalog.defaults(ManualTransactionType.EXPENSE))
+        assertEquals("饮食 › 餐饮", CategoryCatalog.defaultPath(ManualTransactionType.EXPENSE))
+        assertEquals(listOf("餐饮", "早餐", "午餐", "晚餐", "外卖", "买菜", "零食", "饮料"),
+            CategoryCatalog.hierarchyOptions(ManualTransactionType.EXPENSE).getValue("饮食"))
     }
 
     @Test

@@ -48,7 +48,7 @@ class ManualLedgerDatabaseTest {
         assertTrue(repository.update(id, original.copy(amountText = "23.45", category = "交通", note = "已修改")))
         val edited = repository.list().single()
         assertEquals(2345, edited.amountCents)
-        assertEquals("交通", edited.category)
+        assertEquals("出行", edited.category)
         assertEquals("已修改", edited.note)
         assertEquals(2, repository.pendingSyncCount())
 

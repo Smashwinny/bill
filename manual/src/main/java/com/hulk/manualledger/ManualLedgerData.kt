@@ -215,7 +215,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             id = input.stableId ?: UUID.randomUUID().toString(),
             type = input.type,
             amountCents = cents,
-            category = if (input.preserveCategoryPath) input.category.trim().take(80)
+            category = if (input.preserveCategoryPath || CategoryCatalog.HIERARCHY_SEPARATOR in input.category) input.category.trim().take(80)
                 else CategoryCatalog.normalize(input.type, input.category),
             account = input.account.trim().take(40),
             targetAccount = input.targetAccount?.trim()?.take(40)?.ifBlank { null },
