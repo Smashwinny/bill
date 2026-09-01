@@ -445,19 +445,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             require(!source.isSystem) { "系统分类不能被合并" }
             require(!target.isSystem) { "不能合并到无分类" }
             require(targetId !in descendantIds(sourceId, categories)) { "不能合并到自己的子分类" }
-            val now = System.currentTimeMillis()
-            // The final target-subtree rewrite emits one sync event per affected row.
-            // During structural preparation update only category_id to avoid duplicate events.
-            rehomeDirectTransactionsToUnspecified(targetId, now, enqueueSync = false)
-            rehomeDirectTransactionsToUnspecified(sourceId, now, enqueueSync = false)
-            val structural = dao.listCategories()
-            val targetChildren = structural.filter { it.parentId == targetId }.associateBy { it.name }
-            structural.filter { it.parentId == sourceId }.forEach { child ->
-                val collision = targetChildren[child.name]
-                if (collision == null) dao.updateCategory(child.copy(parentId = targetId, updatedAtMs = now))
-                else mergeCategoryNodes(child.id, collision.id)
-            }
-            dao.deleteCategories(listOf(sourceId))
+            mergeCategoryNodes(sourceId, targetId)
             val affected = descendantIds(targetId, dao.listCategories())
             val rewritten = rewriteCategoryPaths(affected)
             result = CategoryMutationResult(rewritten.movedTransactions, 1 + rewritten.removedCategories)
@@ -504,13 +492,31 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
     private fun mergeCategoryNodes(sourceId: String, targetId: String) {
         val dao = db.dao()
         var categories = dao.listCategories()
-        require(categories.any { it.id == sourceId }) { "来源分类不存在" }
+        val source = categories.firstOrNull { it.id == sourceId } ?: error("来源分类不存在")
+        val target = categories.firstOrNull { it.id == targetId } ?: error("目标分类不存在")
         val now = System.currentTimeMillis()
+        val sourceChildren = categories.filter { it.parentId == sourceId }
+        val targetChildrenBefore = categories.filter { it.parentId == targetId }
+        val sourceRows = dao.transactionsInCategories(listOf(sourceId))
+
+        // Two leaves can collapse directly. Creating an “未细分” child here would
+        // make the same collision recur forever at the next depth.
+        if (sourceChildren.isEmpty() && targetChildrenBefore.isEmpty()) {
+            sourceRows.forEach { row -> dao.updateTransaction(row.copy(categoryId = target.id)) }
+            dao.deleteCategories(listOf(source.id))
+            return
+        }
+
+        // The target is or becomes a parent. Preserve any transactions bound directly
+        // to it and move direct source rows into exactly one stable leaf.
         rehomeDirectTransactionsToUnspecified(targetId, now, enqueueSync = false)
-        rehomeDirectTransactionsToUnspecified(sourceId, now, enqueueSync = false)
+        if (sourceRows.isNotEmpty()) {
+            val directLeaf = ensureUnspecifiedChild(target, now)
+            sourceRows.forEach { row -> dao.updateTransaction(row.copy(categoryId = directLeaf.id)) }
+        }
         categories = dao.listCategories()
         val targetChildren = categories.filter { it.parentId == targetId }.associateBy { it.name }
-        categories.filter { it.parentId == sourceId }.forEach { child ->
+        sourceChildren.forEach { child ->
             targetChildren[child.name]?.let { mergeCategoryNodes(child.id, it.id) }
                 ?: dao.updateCategory(child.copy(parentId = targetId, updatedAtMs = now))
         }
@@ -523,22 +529,27 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         if (directRows.isEmpty()) return 0
         val categories = dao.listCategories()
         val parent = categories.firstOrNull { it.id == parentId } ?: return 0
-        val existing = categories.firstOrNull { it.parentId == parentId && it.name == UNSPECIFIED_NAME }
-        val child = existing ?: LedgerCategoryEntity(
-            id = UUID.nameUUIDFromBytes("manual-category-unspecified-v1:$parentId".toByteArray()).toString(),
-            type = parent.type,
-            name = UNSPECIFIED_NAME,
-            parentId = parentId,
-            sortOrder = Int.MAX_VALUE,
-            isSystem = false,
-            createdAtMs = now,
-            updatedAtMs = now,
-        ).also { dao.insertCategoryIgnore(it) }
+        val child = ensureUnspecifiedChild(parent, now)
         directRows.forEachIndexed { index, row ->
             if (enqueueSync) enqueueCategoryChange(row, child, now + index)
             else dao.updateTransaction(row.copy(categoryId = child.id))
         }
         return directRows.size
+    }
+
+    private fun ensureUnspecifiedChild(parent: LedgerCategoryEntity, now: Long): LedgerCategoryEntity {
+        val dao = db.dao()
+        val existing = dao.listCategories().firstOrNull { it.parentId == parent.id && it.name == UNSPECIFIED_NAME }
+        return existing ?: LedgerCategoryEntity(
+            id = UUID.nameUUIDFromBytes("manual-category-unspecified-v1:${parent.id}".toByteArray()).toString(),
+            type = parent.type,
+            name = UNSPECIFIED_NAME,
+            parentId = parent.id,
+            sortOrder = Int.MAX_VALUE,
+            isSystem = false,
+            createdAtMs = now,
+            updatedAtMs = now,
+        ).also { dao.insertCategoryIgnore(it) }
     }
 
     private fun rewriteCategoryPaths(categoryIds: List<String>): CategoryMutationResult {

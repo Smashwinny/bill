@@ -12,8 +12,8 @@ android {
         applicationId = "com.hulk.manualledger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "0.6.3-delete-impact-preview"
+        versionCode = 13
+        versionName = "0.6.4-convergent-category-merge"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
