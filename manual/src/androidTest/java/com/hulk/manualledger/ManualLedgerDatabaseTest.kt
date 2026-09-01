@@ -118,6 +118,8 @@ class ManualLedgerDatabaseTest {
         assertEquals("其他 › API › 租服务器", repository.list().first { it.id == "tree-b" }.category)
         assertLeafBindings()
         assertEquals(4, repository.pendingSyncCount())
+        assertEquals(CategoryMutationResult(0), repository.moveCategory(server.id, api.id))
+        assertEquals(4, repository.pendingSyncCount())
         assertThrows(IllegalArgumentException::class.java) { repository.moveCategory(api.id, server.id) }
         assertThrows(IllegalArgumentException::class.java) { repository.changeTransactionCategory("tree-a", api.id) }
         assertEquals(4, repository.pendingSyncCount())

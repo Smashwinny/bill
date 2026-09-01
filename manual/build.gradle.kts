@@ -12,8 +12,8 @@ android {
         applicationId = "com.hulk.manualledger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 16
-        versionName = "0.6.7-explicit-sync-feedback"
+        versionCode = 17
+        versionName = "0.6.8-idempotent-category-drop"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

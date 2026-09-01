@@ -1333,7 +1333,13 @@ private fun CategoryTreeManagerDialog(
                                                 .firstOrNull { (key, rect) -> key != sourceId && rect.contains(position) }?.key
                                             val source = typed.firstOrNull { it.id == sourceId }
                                             val target = typed.firstOrNull { it.id == targetKey }
-                                            if (source != null && targetKey == rootTarget) {
+                                            if (source != null && targetKey == rootTarget && source.parentId == null) {
+                                                dragHint = "该分类已经是一级分类"
+                                            }
+                                            else if (source != null && target != null && source.parentId == target.id) {
+                                                dragHint = "该分类已经属于“${target.name}”"
+                                            }
+                                            else if (source != null && targetKey == rootTarget) {
                                                 onMove(source.id, null)
                                                 dragHint = "已提交移动，正在刷新分类树…"
                                             }

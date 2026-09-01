@@ -419,6 +419,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             val parent = newParentId?.let { id -> categories.firstOrNull { it.id == id } ?: error("目标分类不存在") }
             require(parent == null || parent.type == source.type) { "只能在同一收支类型中移动" }
             require(parent == null || !parent.isSystem) { "不能拖入无分类" }
+            if (source.parentId == newParentId) return@runInTransaction
             require(categories.none { it.id != source.id && it.parentId == newParentId && it.name == source.name }) {
                 "目标下存在同名分类，请使用合并"
             }
