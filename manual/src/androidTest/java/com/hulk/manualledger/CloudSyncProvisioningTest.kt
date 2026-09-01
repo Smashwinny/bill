@@ -19,6 +19,10 @@ class CloudSyncProvisioningTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
 
         ManualSyncSettings.configure(context, endpoint, token)
+        assertTrue(context.getSharedPreferences("manual_sync", 0).edit()
+            .putBoolean("provisioned_by_test", true).commit())
+        assertTrue(context.getSharedPreferences("manual_sync_secret", 0).edit()
+            .putBoolean("provisioned_by_test", true).commit())
 
         val status = ManualSyncSettings.status(context)
         assertTrue(status.configured)
