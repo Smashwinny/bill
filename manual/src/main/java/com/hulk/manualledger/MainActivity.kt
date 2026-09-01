@@ -351,6 +351,14 @@ private fun ManualLedgerScreen(
     onDisconnectSync: () -> Unit,
     onSyncNow: () -> Unit,
 ) {
+    val context = LocalContext.current
+    var categoryMappings by androidx.compose.runtime.remember { mutableStateOf(loadCategoryMappings(context)) }
+    fun resolveCategory(row: ManualTransactionEntity): String =
+        categoryMappings[categoryMappingKey(row.type, row.category)] ?: CategoryCatalog.normalize(row.type, row.category)
+    fun saveCategoryMapping(type: ManualTransactionType, source: String, target: String) {
+        categoryMappings = categoryMappings + (categoryMappingKey(type, source) to target)
+        persistCategoryMappings(context, categoryMappings)
+    }
     var page by androidx.compose.runtime.remember { mutableStateOf(LedgerPage.OVERVIEW) }
     var type by androidx.compose.runtime.remember { mutableStateOf(ManualTransactionType.EXPENSE) }
     var amount by androidx.compose.runtime.remember { mutableStateOf("") }
@@ -367,8 +375,6 @@ private fun ManualLedgerScreen(
         it.type == ManualTransactionType.EXPENSE &&
             YearMonth.from(Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault())) == previousMonth
     }.sumOf { it.amountCents }
-    val recentCategories = (rows.asSequence().filter { it.type == type }.map { it.category } +
-        defaultCategories(type).asSequence()).distinct().take(8).toList()
 
     pendingImport?.let { preview ->
         val sample = preview.rows.take(3).joinToString("\n") {
@@ -422,6 +428,7 @@ private fun ManualLedgerScreen(
                 onAdd = { page = LedgerPage.RECORD },
                 onAllFlows = { page = LedgerPage.FLOW },
                 onAnalysis = { page = LedgerPage.ANALYSIS },
+                resolveCategory = ::resolveCategory,
             )
             LedgerPage.RECORD -> RecordPage(
                 type = type,
@@ -430,8 +437,8 @@ private fun ManualLedgerScreen(
                 account = account,
                 note = note,
                 occurredAtMs = occurredAtMs,
-                categories = recentCategories,
-                onType = { type = it; category = defaultCategories(it).first() },
+                categories = CategoryCatalog.defaults(type),
+                onType = { type = it; category = CategoryCatalog.defaults(it).first() },
                 onAmount = { amount = it.take(14) },
                 onCategory = { category = it.take(40) },
                 onAccount = { account = it.take(40) },
@@ -456,6 +463,7 @@ private fun ManualLedgerScreen(
             LedgerPage.ANALYSIS -> AnalysisPage(
                 month = month,
                 rows = monthRows,
+                allRows = rows,
                 income = income,
                 expense = expense,
                 previousExpense = previousExpense,
@@ -463,6 +471,8 @@ private fun ManualLedgerScreen(
                 onBudgetChange = onBudgetChange,
                 onPreviousMonth = { month = month.minusMonths(1) },
                 onNextMonth = { if (month < YearMonth.now()) month = month.plusMonths(1) },
+                resolveCategory = ::resolveCategory,
+                onMapCategory = ::saveCategoryMapping,
             )
             LedgerPage.SETTINGS -> SyncSettingsPage(syncStatus, onConfigureSync, onDisconnectSync, onSyncNow)
             }
@@ -517,9 +527,10 @@ private fun OverviewPage(
     onAdd: () -> Unit,
     onAllFlows: () -> Unit,
     onAnalysis: () -> Unit,
+    resolveCategory: (ManualTransactionEntity) -> String,
 ) {
     val grouped = rows.asSequence().filter { it.type == ManualTransactionType.EXPENSE }
-        .groupBy { it.category }.mapValues { (_, value) -> value.sumOf { it.amountCents } }
+        .groupBy(resolveCategory).mapValues { (_, value) -> value.sumOf { it.amountCents } }
         .entries.sortedByDescending { it.value }
     val balance = income - expense
     LazyColumn(modifier = Modifier.fillMaxWidth()) {
@@ -684,21 +695,8 @@ private fun RecordPage(
                         singleLine = true,
                         shape = RoundedCornerShape(16.dp),
                     )
-                    Text("常用分类", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 14.dp))
-                    categories.chunked(4).forEach { row ->
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            row.forEach { item ->
-                                FilterChip(
-                                    modifier = Modifier.weight(1f),
-                                    selected = category == item,
-                                    onClick = { onCategory(item) },
-                                    label = { Text(item, maxLines = 1) },
-                                )
-                            }
-                            repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
-                        }
-                    }
-                    OutlinedTextField(category, onCategory, label = { Text("分类（可直接新建）") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    Text("消费分类", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 14.dp))
+                    CategoryPicker(type, category, categories, onCategory)
                     OutlinedTextField(
                         account,
                         onAccount,
@@ -822,11 +820,15 @@ private fun EditTransactionDialog(
             Column {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     ManualTransactionType.entries.forEach { option ->
-                        FilterChip(selected = type == option, onClick = { type = option }, label = { Text(typeLabel(option)) })
+                        FilterChip(
+                            selected = type == option,
+                            onClick = { type = option; category = CategoryCatalog.defaults(option).first() },
+                            label = { Text(typeLabel(option)) },
+                        )
                     }
                 }
                 OutlinedTextField(amount, { amount = it.take(14) }, label = { Text("金额") }, singleLine = true)
-                OutlinedTextField(category, { category = it.take(40) }, label = { Text("分类") }, singleLine = true)
+                CategoryPicker(type, category, CategoryCatalog.defaults(type)) { category = it }
                 OutlinedTextField(account, { account = it.take(40) }, label = { Text("账户") }, singleLine = true)
                 TransactionDateButton(occurredAtMs) { occurredAtMs = it }
                 OutlinedTextField(note, { note = it.take(200) }, label = { Text("备注") })
@@ -849,6 +851,77 @@ private fun EditTransactionDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+@Composable
+private fun CategoryPicker(
+    type: ManualTransactionType,
+    selected: String,
+    builtIn: List<String>,
+    onSelected: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val key = "custom_categories_${type.name.lowercase()}"
+    var custom by androidx.compose.runtime.remember(type) {
+        mutableStateOf(context.getSharedPreferences("manual_settings", android.content.Context.MODE_PRIVATE)
+            .getStringSet(key, emptySet()).orEmpty().toSet())
+    }
+    var adding by androidx.compose.runtime.remember(type) { mutableStateOf(false) }
+    var draft by androidx.compose.runtime.remember(type) { mutableStateOf("") }
+    val options = (CategoryCatalog.options(type, custom) + selected).filter { it.isNotBlank() }.distinct()
+    options.chunked(4).forEach { row ->
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            row.forEach { item ->
+                FilterChip(
+                    modifier = Modifier.weight(1f),
+                    selected = selected == item,
+                    onClick = { onSelected(item) },
+                    label = { Text(item, maxLines = 1) },
+                )
+            }
+            repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+        }
+    }
+    TextButton(onClick = { draft = ""; adding = true }) { Text("＋ 添加自定义分类") }
+    if (adding) {
+        val normalized = CategoryCatalog.normalize(type, draft)
+        val isMerged = draft.isNotBlank() && normalized != draft.trim()
+        AlertDialog(
+            onDismissRequest = { adding = false },
+            title = { Text("添加分类") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it.take(40) },
+                        label = { Text("分类名称") },
+                        singleLine = true,
+                    )
+                    Text(
+                        if (isMerged) "为避免重复，建议归入“$normalized”" else "相同含义请优先使用已有分类",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isMerged) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = draft.isNotBlank(),
+                    onClick = {
+                        if (!isMerged && normalized !in builtIn) {
+                            custom = custom + normalized
+                            context.getSharedPreferences("manual_settings", android.content.Context.MODE_PRIVATE)
+                                .edit().putStringSet(key, custom).apply()
+                        }
+                        onSelected(normalized)
+                        adding = false
+                    },
+                ) { Text(if (isMerged) "使用“$normalized”" else "添加并使用") }
+            },
+            dismissButton = { TextButton(onClick = { adding = false }) { Text("取消") } },
+        )
+    }
 }
 
 @Composable
@@ -961,6 +1034,7 @@ private fun SyncSettingsPage(
 private fun AnalysisPage(
     month: YearMonth,
     rows: List<ManualTransactionEntity>,
+    allRows: List<ManualTransactionEntity>,
     income: Long,
     expense: Long,
     previousExpense: Long,
@@ -968,11 +1042,15 @@ private fun AnalysisPage(
     onBudgetChange: (String) -> Unit,
     onPreviousMonth: () -> Unit,
     onNextMonth: () -> Unit,
+    resolveCategory: (ManualTransactionEntity) -> String,
+    onMapCategory: (ManualTransactionType, String, String) -> Unit,
 ) {
     val expenses = rows.filter { it.type == ManualTransactionType.EXPENSE }
-    val grouped = expenses.groupBy { it.category }.mapValues { entry -> entry.value.sumOf { it.amountCents } }
+    val grouped = expenses.groupBy(resolveCategory)
+        .mapValues { entry -> entry.value.sumOf { it.amountCents } }
         .entries.sortedByDescending { it.value }
-    val activeDays = rows.map { Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault()).toLocalDate() }.distinct().size
+    val zone = ZoneId.systemDefault()
+    val activeDays = rows.map { Instant.ofEpochMilli(it.occurredAtMs).atZone(zone).toLocalDate() }.distinct().size
     val daysElapsed = if (month == YearMonth.now()) LocalDate.now().dayOfMonth else month.lengthOfMonth()
     val projectedExpense = if (month == YearMonth.now())
         LedgerInsights.projectedExpense(expense, daysElapsed, month.lengthOfMonth()) else expense
@@ -980,61 +1058,106 @@ private fun AnalysisPage(
     var budgetText by androidx.compose.runtime.remember(monthlyBudgetCents) {
         mutableStateOf(if (monthlyBudgetCents > 0) "%d.%02d".format(monthlyBudgetCents / 100, monthlyBudgetCents % 100) else "")
     }
-    Spacer(Modifier.height(8.dp))
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        TextButton(onClick = onPreviousMonth) { Text("‹ 上月") }
-        Text("${month.year} 年 ${month.monthValue} 月", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
-        TextButton(onClick = onNextMonth, enabled = month < YearMonth.now()) { Text("下月 ›") }
+    val peak = LedgerInsights.peakTime(expenses, zone)
+    val weekendShare = LedgerInsights.weekendSharePercent(expenses, zone)
+    val highestDay = expenses.groupBy { Instant.ofEpochMilli(it.occurredAtMs).atZone(zone).toLocalDate() }
+        .mapValues { (_, dayRows) -> dayRows.sumOf { it.amountCents } }.maxByOrNull { it.value }
+    val largest = expenses.maxByOrNull { it.amountCents }
+    val mergedCount = expenses.count { resolveCategory(it) != it.category }
+    var managingCategories by androidx.compose.runtime.remember { mutableStateOf(false) }
+    var mappingSource by androidx.compose.runtime.remember { mutableStateOf<String?>(null) }
+    val allExpenses = allRows.filter { it.type == ManualTransactionType.EXPENSE }
+    val sourceCategories = allExpenses.groupBy { it.category }.mapValues { (_, sourceRows) ->
+        sourceRows.size to sourceRows.sumOf { it.amountCents }
+    }.entries.sortedByDescending { it.value.second }
+    if (managingCategories) {
+        AlertDialog(
+            onDismissRequest = { managingCategories = false },
+            title = { Text("整理随手记分类") },
+            text = {
+                LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                    item { Text("选择原分类，再归入一个规范分类。只保存归类规则，不改写原始流水。", style = MaterialTheme.typography.bodySmall) }
+                    items(sourceCategories, key = { it.key }) { source ->
+                        TextButton(onClick = { managingCategories = false; mappingSource = source.key }, modifier = Modifier.fillMaxWidth()) {
+                            Text("${source.key}  ·  ${source.value.first} 笔  ·  ${money(source.value.second)}  →  ${resolveCategory(allExpenses.first { it.category == source.key })}", modifier = Modifier.fillMaxWidth())
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { managingCategories = false }) { Text("完成") } },
+        )
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        SummaryCard("本月收入", money(income), Modifier.weight(1f))
-        SummaryCard("本月支出", money(expense), Modifier.weight(1f))
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-        SummaryCard("日均支出", money(expense / daysElapsed), Modifier.weight(1f))
-        SummaryCard("记账天数", "$activeDays 天", Modifier.weight(1f))
-    }
-    Card(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text("月底预测", style = MaterialTheme.typography.bodySmall)
-            Text(money(projectedExpense), style = MaterialTheme.typography.titleLarge)
-            Text(
-                monthChange?.let { if (it >= 0) "比上月多 $it%" else "比上月少 ${-it}%" }
-                    ?: "上月暂无可比较支出",
-                style = MaterialTheme.typography.bodySmall,
-            )
+    mappingSource?.let { source ->
+        var target by androidx.compose.runtime.remember(source) {
+            mutableStateOf(resolveCategory(allExpenses.first { it.category == source }))
         }
-    }
-    Text("月预算", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
-    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-        OutlinedTextField(
-            value = budgetText,
-            onValueChange = { budgetText = it.take(14) },
-            label = { Text("预算金额") },
-            prefix = { Text("¥ ") },
-            singleLine = true,
-            modifier = Modifier.weight(1f),
-        )
-        Spacer(Modifier.width(8.dp))
-        Button(
-            enabled = budgetText.isBlank() || ManualLedgerRepository.parseCents(budgetText) != null,
-            onClick = { onBudgetChange(budgetText) },
-        ) { Text("保存") }
-    }
-    if (monthlyBudgetCents > 0) {
-        val budgetRatio = (expense.toFloat() / monthlyBudgetCents).coerceIn(0f, 1f)
-        LinearProgressIndicator(progress = { budgetRatio }, modifier = Modifier.fillMaxWidth())
-        val remaining = monthlyBudgetCents - expense
-        Text(
-            if (remaining >= 0) "还可支出 ${money(remaining)} · 已用 ${(expense * 100 / monthlyBudgetCents)}%"
-            else "已超预算 ${money(-remaining)}",
-            color = if (remaining >= 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+        AlertDialog(
+            onDismissRequest = { mappingSource = null },
+            title = { Text("“$source”归入") },
+            text = { Column { CategoryPicker(ManualTransactionType.EXPENSE, target, CategoryCatalog.defaults(ManualTransactionType.EXPENSE)) { target = it } } },
+            confirmButton = {
+                TextButton(onClick = { onMapCategory(ManualTransactionType.EXPENSE, source, target); mappingSource = null; managingCategories = true }) { Text("保存归类") }
+            },
+            dismissButton = { TextButton(onClick = { mappingSource = null }) { Text("取消") } },
         )
     }
-    Text("支出分类", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
-    if (grouped.isEmpty()) Text("本月还没有支出数据")
     LazyColumn(modifier = Modifier.fillMaxWidth()) {
-        items(grouped.toList(), key = { it.key }) { item ->
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                TextButton(onClick = onPreviousMonth) { Text("‹ 上月") }
+                Text("${month.year} 年 ${month.monthValue} 月", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
+                TextButton(onClick = onNextMonth, enabled = month < YearMonth.now()) { Text("下月 ›") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SummaryCard("本月收入", money(income), Modifier.weight(1f))
+                SummaryCard("本月支出", money(expense), Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                SummaryCard("日均支出", money(expense / daysElapsed), Modifier.weight(1f))
+                SummaryCard("记账天数", "$activeDays 天", Modifier.weight(1f))
+            }
+            Card(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(if (month == YearMonth.now()) "预计本月消费" else "本月实际消费", style = MaterialTheme.typography.bodySmall)
+                    Text(money(projectedExpense), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        monthChange?.let { if (it >= 0) "当前支出比上月多 $it%" else "当前支出比上月少 ${-it}%" }
+                            ?: "上月暂无可比较支出",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (month == YearMonth.now()) Text("按本月前 $daysElapsed 天平均消费速度估算", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                    if (monthlyBudgetCents > 0 && projectedExpense > monthlyBudgetCents) {
+                        Text("照此速度预计超预算 ${money(projectedExpense - monthlyBudgetCents)}", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+            Text("消费习惯", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SummaryCard("消费高峰", peak?.label ?: "暂无数据", Modifier.weight(1f))
+                SummaryCard("周末消费占比", "$weekendShare%", Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                SummaryCard("最高消费日", highestDay?.let { "${it.key.monthValue}/${it.key.dayOfMonth}  ${money(it.value)}" } ?: "暂无", Modifier.weight(1f))
+                SummaryCard("最大单笔", largest?.let { money(it.amountCents) } ?: "暂无", Modifier.weight(1f))
+            }
+            peak?.let { Text("${it.label} 共 ${it.count} 笔，合计 ${money(it.amountCents)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(top = 6.dp)) }
+            Text("月预算", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp))
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                OutlinedTextField(budgetText, { budgetText = it.take(14) }, label = { Text("预算金额") }, prefix = { Text("¥ ") }, singleLine = true, modifier = Modifier.weight(1f))
+                Spacer(Modifier.width(8.dp))
+                Button(enabled = budgetText.isBlank() || ManualLedgerRepository.parseCents(budgetText) != null, onClick = { onBudgetChange(budgetText) }) { Text("保存") }
+            }
+            if (monthlyBudgetCents > 0) {
+                val ratio = (expense.toFloat() / monthlyBudgetCents).coerceIn(0f, 1f)
+                LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth())
+                Text(if (expense <= monthlyBudgetCents) "还可支出 ${money(monthlyBudgetCents - expense)}" else "已超预算 ${money(expense - monthlyBudgetCents)}")
+            }
+            Text("支出分类", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
+            TextButton(onClick = { managingCategories = true }, enabled = sourceCategories.isNotEmpty()) { Text("整理随手记分类（${sourceCategories.size} 类）") }
+            if (mergedCount > 0) Text("已自动将 $mergedCount 笔相近分类归并统计（不会改动原始流水）", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            if (grouped.isEmpty()) Text("本月还没有支出数据")
+        }
+        items(grouped, key = { it.key }) { item ->
             val ratio = if (expense == 0L) 0f else item.value.toFloat() / expense
             Column(modifier = Modifier.padding(vertical = 7.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1044,7 +1167,23 @@ private fun AnalysisPage(
                 LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth())
             }
         }
+        item { Spacer(Modifier.height(16.dp)) }
     }
+}
+
+private fun categoryMappingKey(type: ManualTransactionType, source: String): String = "${type.name}\t${source.trim()}"
+
+private fun loadCategoryMappings(context: android.content.Context): Map<String, String> =
+    context.getSharedPreferences("manual_settings", android.content.Context.MODE_PRIVATE)
+        .getStringSet("category_mappings", emptySet()).orEmpty().mapNotNull { row ->
+            val fields = row.split('\t', limit = 3)
+            if (fields.size == 3) "${fields[0]}\t${fields[1]}" to fields[2] else null
+        }.toMap()
+
+private fun persistCategoryMappings(context: android.content.Context, mappings: Map<String, String>) {
+    val encoded = mappings.map { (key, target) -> "$key\t$target" }.toSet()
+    context.getSharedPreferences("manual_settings", android.content.Context.MODE_PRIVATE)
+        .edit().putStringSet("category_mappings", encoded).apply()
 }
 
 @Composable
@@ -1055,12 +1194,6 @@ private fun SummaryCard(label: String, value: String, modifier: Modifier = Modif
             Text(value, style = MaterialTheme.typography.titleLarge)
         }
     }
-}
-
-private fun defaultCategories(type: ManualTransactionType): List<String> = when (type) {
-    ManualTransactionType.EXPENSE -> listOf("餐饮", "交通", "购物", "居家", "娱乐", "医疗", "人情", "其他")
-    ManualTransactionType.INCOME -> listOf("工资", "奖金", "兼职", "理财", "报销", "退款", "礼金", "其他")
-    ManualTransactionType.TRANSFER -> listOf("账户互转", "还款", "借出", "收回", "其他")
 }
 
 private fun categoryColor(category: String): Color {

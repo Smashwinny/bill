@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDateTime
+import java.time.LocalDate
 import java.time.ZoneId
 import java.io.ByteArrayOutputStream
 import java.util.zip.ZipEntry
@@ -138,6 +139,32 @@ class ManualLedgerContractTest {
         assertEquals(25, LedgerInsights.monthChangePercent(12500, 10000))
         assertEquals(-25, LedgerInsights.monthChangePercent(7500, 10000))
         assertEquals(null, LedgerInsights.monthChangePercent(7500, 0))
+    }
+
+    @Test
+    fun categoryCatalogGuidesAliasesButKeepsGenuineCustomCategories() {
+        assertEquals("宠物", CategoryCatalog.normalize(ManualTransactionType.EXPENSE, "小猫"))
+        assertEquals("餐饮", CategoryCatalog.normalize(ManualTransactionType.EXPENSE, "外卖"))
+        assertEquals("摄影", CategoryCatalog.normalize(ManualTransactionType.EXPENSE, "摄影"))
+        assertTrue("宠物" in CategoryCatalog.defaults(ManualTransactionType.EXPENSE))
+    }
+
+    @Test
+    fun insightsFindPeakTimeAndWeekendSpendingShare() {
+        val zone = ZoneId.of("Asia/Shanghai")
+        fun expense(local: LocalDateTime, cents: Long) = ManualTransactionEntity(
+            id = local.toString(), type = ManualTransactionType.EXPENSE, amountCents = cents,
+            category = "餐饮", account = "现金", targetAccount = null,
+            occurredAtMs = local.atZone(zone).toInstant().toEpochMilli(), note = null,
+            createdAtMs = 1, updatedAtMs = 1,
+        )
+        val rows = listOf(
+            expense(LocalDate.of(2026, 8, 29).atTime(19, 0), 3000),
+            expense(LocalDate.of(2026, 8, 30).atTime(20, 0), 1000),
+            expense(LocalDate.of(2026, 8, 31).atTime(8, 0), 6000),
+        )
+        assertEquals("晚间 18–23点", LedgerInsights.peakTime(rows, zone)?.label)
+        assertEquals(40, LedgerInsights.weekendSharePercent(rows, zone))
     }
 
     @Test

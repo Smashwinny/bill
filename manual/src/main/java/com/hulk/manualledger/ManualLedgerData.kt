@@ -16,12 +16,16 @@ import androidx.room.Update
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.Instant
+import java.time.ZoneId
+import java.time.DayOfWeek
 import java.util.UUID
 
 enum class ManualTransactionType { EXPENSE, INCOME, TRANSFER }
 enum class OutboxState { PENDING, SYNCED }
 
 object LedgerInsights {
+    data class TimePeak(val label: String, val count: Int, val amountCents: Long)
+
     fun projectedExpense(expenseCents: Long, elapsedDays: Int, monthDays: Int): Long {
         if (expenseCents <= 0 || elapsedDays <= 0 || monthDays <= 0) return 0
         return BigDecimal.valueOf(expenseCents).multiply(BigDecimal.valueOf(monthDays.toLong()))
@@ -34,6 +38,30 @@ object LedgerInsights {
         return BigDecimal.valueOf(currentCents - previousCents).multiply(BigDecimal.valueOf(100))
             .divide(BigDecimal.valueOf(previousCents), 0, RoundingMode.DOWN)
             .intValueExact()
+    }
+
+    fun peakTime(expenses: List<ManualTransactionEntity>, zone: ZoneId = ZoneId.systemDefault()): TimePeak? {
+        return expenses.groupBy { timeLabel(Instant.ofEpochMilli(it.occurredAtMs).atZone(zone).hour) }
+            .map { (label, rows) -> TimePeak(label, rows.size, rows.sumOf { it.amountCents }) }
+            .maxWithOrNull(compareBy<TimePeak> { it.count }.thenBy { it.amountCents })
+    }
+
+    fun weekendSharePercent(expenses: List<ManualTransactionEntity>, zone: ZoneId = ZoneId.systemDefault()): Int {
+        val total = expenses.sumOf { it.amountCents }
+        if (total <= 0) return 0
+        val weekend = expenses.filter {
+            Instant.ofEpochMilli(it.occurredAtMs).atZone(zone).dayOfWeek in setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY)
+        }.sumOf { it.amountCents }
+        return (weekend * 100 / total).toInt()
+    }
+
+    private fun timeLabel(hour: Int): String = when (hour) {
+        in 0..5 -> "深夜 0–5点"
+        in 6..9 -> "早间 6–9点"
+        in 10..11 -> "上午 10–11点"
+        in 12..13 -> "午间 12–13点"
+        in 14..17 -> "下午 14–17点"
+        else -> "晚间 18–23点"
     }
 }
 
@@ -159,7 +187,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             id = input.stableId ?: UUID.randomUUID().toString(),
             type = input.type,
             amountCents = cents,
-            category = input.category.trim().take(40),
+            category = CategoryCatalog.normalize(input.type, input.category),
             account = input.account.trim().take(40),
             targetAccount = input.targetAccount?.trim()?.take(40)?.ifBlank { null },
             occurredAtMs = input.occurredAtMs,
@@ -207,7 +235,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         val updated = original.copy(
             type = input.type,
             amountCents = cents,
-            category = input.category.trim().take(40),
+            category = CategoryCatalog.normalize(input.type, input.category),
             account = input.account.trim().take(40),
             targetAccount = input.targetAccount?.trim()?.take(40)?.ifBlank { null },
             occurredAtMs = input.occurredAtMs,

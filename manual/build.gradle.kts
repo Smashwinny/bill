@@ -12,8 +12,8 @@ android {
         applicationId = "com.hulk.manualledger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.3.1-cloud-sync"
+        versionCode = 5
+        versionName = "0.4.0-insights-categories"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
