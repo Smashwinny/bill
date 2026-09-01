@@ -1206,7 +1206,8 @@ private fun CategoryTreeManagerDialog(
     var dragPosition by remember { mutableStateOf<Offset?>(null) }
     var pendingMerge by remember { mutableStateOf<Pair<LedgerCategoryEntity, LedgerCategoryEntity>?>(null) }
     var pendingDelete by remember { mutableStateOf<LedgerCategoryEntity?>(null) }
-    val bounds = remember { mutableStateMapOf<String, androidx.compose.ui.geometry.Rect>() }
+    var dragHint by remember { mutableStateOf<String?>(null) }
+    val bounds = remember(type, categories) { mutableStateMapOf<String, androidx.compose.ui.geometry.Rect>() }
     val typed = categories.filter { it.type == type }
     val treeRows = flattenedCategoryTree(typed)
     val rootTarget = "__root__"
@@ -1255,10 +1256,22 @@ private fun CategoryTreeManagerDialog(
             Column {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     ManualTransactionType.entries.forEach { option ->
-                        FilterChip(selected = type == option, onClick = { type = option }, label = { Text(typeLabel(option)) })
+                        FilterChip(selected = type == option, onClick = {
+                            type = option
+                            draggedId = null
+                            dragPosition = null
+                            dragHint = null
+                        }, label = { Text(typeLabel(option)) })
                     }
                 }
                 Text("长按分类后拖到另一分类：成为其子分类；同名则询问合并。", style = MaterialTheme.typography.bodySmall)
+                dragHint?.let {
+                    Text(
+                        it,
+                        color = if (it.startsWith("已提交")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 Surface(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
                         .onGloballyPositioned { bounds[rootTarget] = it.boundsInRoot() },
@@ -1276,6 +1289,7 @@ private fun CategoryTreeManagerDialog(
                                         onDragStart = { local ->
                                             draggedId = node.id
                                             dragPosition = (bounds[node.id]?.topLeft ?: Offset.Zero) + local
+                                            dragHint = null
                                         },
                                         onDrag = { change, amount ->
                                             change.consume()
@@ -1289,11 +1303,17 @@ private fun CategoryTreeManagerDialog(
                                                 .firstOrNull { (key, rect) -> key != sourceId && rect.contains(position) }?.key
                                             val source = typed.firstOrNull { it.id == sourceId }
                                             val target = typed.firstOrNull { it.id == targetKey }
-                                            if (source != null && targetKey == rootTarget) onMove(source.id, null)
+                                            if (source != null && targetKey == rootTarget) {
+                                                onMove(source.id, null)
+                                                dragHint = "已提交移动，正在刷新分类树…"
+                                            }
                                             else if (source != null && target != null && !target.isSystem) {
                                                 if (source.name == target.name) pendingMerge = source to target
                                                 else onMove(source.id, target.id)
+                                                if (source.name != target.name) dragHint = "已提交移动，正在刷新分类树…"
                                             }
+                                            else dragHint = if (target?.isSystem == true) "“无分类”不能包含子分类"
+                                                else "没有落到有效分类上，请长按后拖到目标分类行"
                                             draggedId = null
                                             dragPosition = null
                                         },
