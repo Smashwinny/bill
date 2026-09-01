@@ -26,7 +26,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-private const val DEFAULT_SYNC_ENDPOINT = "https://ledger.geniusqi.com/v1/sync"
+private const val DEFAULT_SYNC_ENDPOINT = "https://bill.geniusqi.com/v1/sync"
 
 class ManualLedgerApp : Application() {
     override fun onCreate() {

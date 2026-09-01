@@ -90,7 +90,7 @@ class MainActivity : ComponentActivity() {
     private var pendingImport by mutableStateOf<SuishouImportResult?>(null)
     private var monthlyBudgetCents by mutableStateOf(0L)
     private var exportPayload: String? = null
-    private var syncStatus by mutableStateOf(ManualSyncStatus(false, "https://ledger.geniusqi.com/v1/sync", 0L, null))
+    private var syncStatus by mutableStateOf(ManualSyncStatus(false, "https://bill.geniusqi.com/v1/sync", 0L, null))
     private val ledgerObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
         override fun onChange(selfChange: Boolean) { executor.execute { refresh("云端流水已更新") } }
     }
