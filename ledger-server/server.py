@@ -114,6 +114,7 @@ def validate_event(event: dict):
 
 class LedgerHandler(BaseHTTPRequestHandler):
     server_version = "LocalLedger/1"
+    protocol_version = "HTTP/1.1"
 
     def do_GET(self):
         if self.path == "/healthz":
