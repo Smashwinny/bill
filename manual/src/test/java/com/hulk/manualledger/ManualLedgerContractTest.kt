@@ -180,6 +180,11 @@ class ManualLedgerContractTest {
         )
         assertEquals("晚间 18–23点", LedgerInsights.peakTime(rows, zone)?.label)
         assertEquals(40, LedgerInsights.weekendSharePercent(rows, zone))
+        val daily = LedgerInsights.dailySpending(rows, java.time.YearMonth.of(2026, 8), zone)
+        assertEquals(31, daily.size)
+        assertEquals(3000L, daily.first { it.dayOfMonth == 29 }.amountCents)
+        assertEquals(6000L, daily.first { it.dayOfMonth == 31 }.amountCents)
+        assertEquals(0L, daily.first { it.dayOfMonth == 1 }.amountCents)
     }
 
     @Test

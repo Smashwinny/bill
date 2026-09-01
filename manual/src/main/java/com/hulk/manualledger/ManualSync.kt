@@ -120,7 +120,8 @@ object ManualSyncScheduler {
 class ManualSyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val token = ManualSyncSettings.token(applicationContext) ?: return Result.success()
-        val database = Room.databaseBuilder(applicationContext, ManualLedgerDatabase::class.java, "manual-ledger.db").build()
+        val database = Room.databaseBuilder(applicationContext, ManualLedgerDatabase::class.java, "manual-ledger.db")
+            .addMigrations(MANUAL_LEDGER_MIGRATION_1_2).build()
         val dao = database.dao()
         var cursor = ManualSyncSettings.cursor(applicationContext)
         return try {
@@ -187,7 +188,7 @@ class ManualSyncWorker(context: Context, params: WorkerParameters) : CoroutineWo
             type = ManualTransactionType.valueOf(payload.getString("type")),
             amountCents = payload.getLong("amount_cents"),
             currency = payload.optString("currency", "CNY"),
-            category = payload.getString("category").take(40),
+            category = payload.getString("category").take(80),
             account = payload.getString("account").take(40),
             targetAccount = payload.optNullableString("target_account")?.take(40),
             occurredAtMs = payload.getLong("occurred_at_ms"),
