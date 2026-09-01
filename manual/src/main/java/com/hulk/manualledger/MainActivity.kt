@@ -23,9 +23,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -38,6 +41,8 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudQueue
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DragIndicator
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Savings
@@ -64,10 +69,18 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -85,6 +98,7 @@ class MainActivity : ComponentActivity() {
     private val executor = Executors.newSingleThreadExecutor()
     private lateinit var repository: ManualLedgerRepository
     private var rows by mutableStateOf<List<ManualTransactionEntity>>(emptyList())
+    private var categoryNodes by mutableStateOf<List<LedgerCategoryEntity>>(emptyList())
     private var pendingCount by mutableStateOf(0L)
     private var message by mutableStateOf("本地数据库已就绪")
     private var pendingImport by mutableStateOf<SuishouImportResult?>(null)
@@ -121,6 +135,7 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     ManualLedgerScreen(
                         rows = rows,
+                        categoryNodes = categoryNodes,
                         pendingCount = pendingCount,
                         message = message,
                         onSave = ::save,
@@ -142,7 +157,11 @@ class MainActivity : ComponentActivity() {
                         syncStatus = syncStatus,
                         onConfigureSync = ::configureSync,
                         onDisconnectSync = ::disconnectSync,
-                        onSyncNow = { ManualSyncScheduler.syncNow(this) },
+                        onSyncNow = ::syncNowWithFeedback,
+                        onMoveCategory = ::moveCategory,
+                        onMergeCategories = ::mergeCategories,
+                        onDeleteCategory = ::deleteCategory,
+                        onChangeTransactionCategory = ::changeTransactionCategory,
                     )
                 }
             }
@@ -300,12 +319,58 @@ class MainActivity : ComponentActivity() {
         message = "已断开云端；本地流水不受影响"
     }
 
+    private fun syncNowWithFeedback() {
+        message = if (pendingCount > 0) "正在同步，待处理 $pendingCount 条…" else "正在检查云端更新…"
+        ManualSyncScheduler.syncNow(this)
+        fun scheduleFeedback(delayMs: Long) = Handler(Looper.getMainLooper()).postDelayed({
+            if (::repository.isInitialized) executor.execute {
+                val pending = repository.pendingSyncCount()
+                val status = ManualSyncSettings.status(this)
+                val feedback = when {
+                    status.lastError != null -> "同步失败：${status.lastError}；待同步 $pending 条"
+                    pending == 0L -> "同步完成，云端与本机已对齐"
+                    else -> "正在同步，剩余 $pending 条…"
+                }
+                refresh(feedback)
+            }
+        }, delayMs)
+        scheduleFeedback(1800)
+        scheduleFeedback(6000)
+    }
+
+    private fun moveCategory(sourceId: String, targetId: String?) = mutateCategories("分类已移动") {
+        repository.moveCategory(sourceId, targetId)
+    }
+
+    private fun mergeCategories(sourceId: String, targetId: String) = mutateCategories("分类已合并，历史账单已迁移") {
+        repository.mergeCategories(sourceId, targetId)
+    }
+
+    private fun deleteCategory(categoryId: String) = mutateCategories("分类已删除，受影响账单已归入无分类") {
+        repository.deleteCategory(categoryId)
+    }
+
+    private fun changeTransactionCategory(transactionId: String, categoryId: String) = mutateCategories("账单分类已修改") {
+        repository.changeTransactionCategory(transactionId, categoryId)
+    }
+
+    private fun mutateCategories(success: String, operation: () -> Any) {
+        message = "正在更新分类…"
+        executor.execute {
+            runCatching(operation)
+                .onSuccess { ManualSyncScheduler.syncNow(this); refresh(success) }
+                .onFailure { runOnUiThread { message = it.message ?: "分类操作失败" } }
+        }
+    }
+
     private fun refresh(after: String? = null) {
         val latest = repository.list()
+        val latestCategories = repository.categories()
         val pending = repository.pendingSyncCount()
         val latestSync = ManualSyncSettings.status(this)
         runOnUiThread {
             rows = latest
+            categoryNodes = latestCategories
             pendingCount = pending
             syncStatus = latestSync
             if (after != null) message = after
@@ -332,6 +397,7 @@ private val LedgerColorScheme = lightColorScheme(
 @Composable
 private fun ManualLedgerScreen(
     rows: List<ManualTransactionEntity>,
+    categoryNodes: List<LedgerCategoryEntity>,
     pendingCount: Long,
     message: String,
     onSave: (NewManualTransaction) -> Unit,
@@ -349,6 +415,10 @@ private fun ManualLedgerScreen(
     onConfigureSync: (String, String) -> Unit,
     onDisconnectSync: () -> Unit,
     onSyncNow: () -> Unit,
+    onMoveCategory: (String, String?) -> Unit,
+    onMergeCategories: (String, String) -> Unit,
+    onDeleteCategory: (String) -> Unit,
+    onChangeTransactionCategory: (String, String) -> Unit,
 ) {
     val context = LocalContext.current
     var categoryMappings by androidx.compose.runtime.remember { mutableStateOf(loadCategoryMappings(context)) }
@@ -443,7 +513,7 @@ private fun ManualLedgerScreen(
                 observedHierarchy = CategoryCatalog.observedHierarchy(rows.filter { it.type == type }.map { it.category }),
                 onType = { type = it; category = CategoryCatalog.defaultPath(it) },
                 onAmount = { amount = it.take(14) },
-                onCategory = { category = it.take(40) },
+                onCategory = { category = it.take(80) },
                 onAccount = { account = it.take(40) },
                 onNote = { note = it.take(200) },
                 onOccurredAt = { occurredAtMs = it },
@@ -462,7 +532,10 @@ private fun ManualLedgerScreen(
                     page = LedgerPage.FLOW
                 },
             )
-            LedgerPage.FLOW -> FlowPage(rows, onImport, onExport, onDirectMigration, onDelete, onEdit)
+            LedgerPage.FLOW -> FlowPage(
+                rows, categoryNodes, onImport, onExport, onDirectMigration, onDelete, onEdit,
+                onChangeTransactionCategory,
+            )
             LedgerPage.ANALYSIS -> AnalysisPage(
                 month = month,
                 rows = monthRows,
@@ -477,7 +550,10 @@ private fun ManualLedgerScreen(
                 resolveCategory = ::resolveCategory,
                 onMapCategory = ::saveCategoryMapping,
             )
-            LedgerPage.SETTINGS -> SyncSettingsPage(syncStatus, onConfigureSync, onDisconnectSync, onSyncNow)
+            LedgerPage.SETTINGS -> SyncSettingsPage(
+                syncStatus, categoryNodes, rows, onConfigureSync, onDisconnectSync, onSyncNow,
+                onMoveCategory, onMergeCategories, onDeleteCategory,
+            )
             }
         }
     }
@@ -726,14 +802,17 @@ private fun RecordPage(
 @Composable
 private fun FlowPage(
     rows: List<ManualTransactionEntity>,
+    categoryNodes: List<LedgerCategoryEntity>,
     onImport: () -> Unit,
     onExport: () -> Unit,
     onDirectMigration: () -> Unit,
     onDelete: (String) -> Unit,
     onEdit: (String, NewManualTransaction) -> Unit,
+    onChangeTransactionCategory: (String, String) -> Unit,
 ) {
     var query by androidx.compose.runtime.remember { mutableStateOf("") }
     var editing by androidx.compose.runtime.remember { mutableStateOf<ManualTransactionEntity?>(null) }
+    var changingCategory by androidx.compose.runtime.remember { mutableStateOf<ManualTransactionEntity?>(null) }
     val visibleRows = rows.filter { row ->
         query.isBlank() || listOf(row.category, row.account, row.note.orEmpty(), money(row.amountCents))
             .any { it.contains(query.trim(), ignoreCase = true) }
@@ -744,6 +823,15 @@ private fun FlowPage(
             allRows = rows,
             onDismiss = { editing = null },
             onSave = { input -> onEdit(row.id, input); editing = null },
+        )
+    }
+    changingCategory?.let { row ->
+        LeafCategoryDialog(
+            type = row.type,
+            categories = categoryNodes,
+            selectedId = row.categoryId,
+            onDismiss = { changingCategory = null },
+            onSelect = { categoryId -> onChangeTransactionCategory(row.id, categoryId); changingCategory = null },
         )
     }
     Text("全部流水", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
@@ -767,7 +855,12 @@ private fun FlowPage(
         Text("没有匹配“$query”的流水", modifier = Modifier.padding(top = 24.dp))
     } else LazyColumn(modifier = Modifier.fillMaxWidth()) {
         items(visibleRows, key = { it.id }) { row ->
-            TransactionRow(row, onEdit = { editing = row }, onDelete = { onDelete(row.id) })
+            TransactionRow(
+                row,
+                onEdit = { editing = row },
+                onChangeCategory = { changingCategory = row },
+                onDelete = { onDelete(row.id) },
+            )
         }
     }
 }
@@ -776,6 +869,7 @@ private fun FlowPage(
 private fun TransactionRow(
     row: ManualTransactionEntity,
     onEdit: (() -> Unit)? = null,
+    onChangeCategory: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
 ) {
     Card(
@@ -791,8 +885,9 @@ private fun TransactionRow(
                 Text(row.category, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text("${row.account} · ${formatTime(row.occurredAtMs)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
                 row.note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                if (onEdit != null || onDelete != null) Row {
+                if (onEdit != null || onChangeCategory != null || onDelete != null) Row {
                     onEdit?.let { TextButton(onClick = it) { Text("编辑") } }
+                    onChangeCategory?.let { TextButton(onClick = it) { Text("改分类") } }
                     onDelete?.let { TextButton(onClick = it) { Text("删除", color = MaterialTheme.colorScheme.error) } }
                 }
             }
@@ -1030,17 +1125,216 @@ private fun TransactionDateButton(valueMs: Long, onValueChange: (Long) -> Unit) 
 }
 
 @Composable
+private fun LeafCategoryDialog(
+    type: ManualTransactionType,
+    categories: List<LedgerCategoryEntity>,
+    selectedId: String?,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit,
+) {
+    val typed = categories.filter { it.type == type }
+    val parentIds = typed.mapNotNull { it.parentId }.toSet()
+    val leaves = typed.filter { it.id !in parentIds }.sortedBy { categoryNodePath(it.id, typed) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("更改账单分类") },
+        text = {
+            LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                items(leaves, key = { it.id }) { node ->
+                    FilterChip(
+                        selected = node.id == selectedId,
+                        onClick = { onSelect(node.id) },
+                        label = { Text(categoryNodePath(node.id, typed)) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+private data class CategoryTreeRow(val node: LedgerCategoryEntity, val depth: Int)
+
+private fun flattenedCategoryTree(categories: List<LedgerCategoryEntity>): List<CategoryTreeRow> {
+    val children = categories.groupBy { it.parentId }
+    val result = mutableListOf<CategoryTreeRow>()
+    fun visit(node: LedgerCategoryEntity, depth: Int) {
+        result += CategoryTreeRow(node, depth)
+        children[node.id].orEmpty().sortedWith(compareBy<LedgerCategoryEntity> { it.sortOrder }.thenBy { it.name })
+            .forEach { visit(it, depth + 1) }
+    }
+    children[null].orEmpty().sortedWith(compareBy<LedgerCategoryEntity> { it.sortOrder }.thenBy { it.name })
+        .forEach { visit(it, 0) }
+    return result
+}
+
+private fun categoryNodePath(id: String, categories: List<LedgerCategoryEntity>): String {
+    val byId = categories.associateBy { it.id }
+    val names = mutableListOf<String>()
+    val seen = mutableSetOf<String>()
+    var node = byId[id]
+    while (node != null && seen.add(node.id)) {
+        names += node.name
+        node = node.parentId?.let(byId::get)
+    }
+    return names.asReversed().joinToString(CategoryCatalog.HIERARCHY_SEPARATOR)
+}
+
+private fun categoryDescendantIds(id: String, categories: List<LedgerCategoryEntity>): Set<String> {
+    val children = categories.groupBy { it.parentId }
+    val result = linkedSetOf<String>()
+    fun visit(current: String) { result += current; children[current].orEmpty().forEach { visit(it.id) } }
+    visit(id)
+    return result
+}
+
+@Composable
+private fun CategoryTreeManagerDialog(
+    categories: List<LedgerCategoryEntity>,
+    rows: List<ManualTransactionEntity>,
+    onDismiss: () -> Unit,
+    onMove: (String, String?) -> Unit,
+    onMerge: (String, String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    var type by remember { mutableStateOf(ManualTransactionType.EXPENSE) }
+    var draggedId by remember { mutableStateOf<String?>(null) }
+    var dragPosition by remember { mutableStateOf<Offset?>(null) }
+    var pendingMerge by remember { mutableStateOf<Pair<LedgerCategoryEntity, LedgerCategoryEntity>?>(null) }
+    var pendingDelete by remember { mutableStateOf<LedgerCategoryEntity?>(null) }
+    val bounds = remember { mutableStateMapOf<String, androidx.compose.ui.geometry.Rect>() }
+    val typed = categories.filter { it.type == type }
+    val treeRows = flattenedCategoryTree(typed)
+    val rootTarget = "__root__"
+
+    pendingMerge?.let { (source, target) ->
+        AlertDialog(
+            onDismissRequest = { pendingMerge = null },
+            title = { Text("合并同名分类？") },
+            text = { Text("“${categoryNodePath(source.id, typed)}”将合并到“${categoryNodePath(target.id, typed)}”。来源分类的账单和子分类都会迁移，此操作会同步到云端。") },
+            confirmButton = { TextButton(onClick = { onMerge(source.id, target.id); pendingMerge = null }) { Text("确认合并") } },
+            dismissButton = { TextButton(onClick = { pendingMerge = null }) { Text("取消") } },
+        )
+    }
+    pendingDelete?.let { node ->
+        val ids = categoryDescendantIds(node.id, typed)
+        val affected = rows.count { it.categoryId in ids }
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除“${node.name}”？") },
+            text = { Text("将删除 ${ids.size} 个分类节点。$affected 条历史账单会失去原分类并自动转入“无分类”。是否确定？") },
+            confirmButton = {
+                TextButton(onClick = { onDelete(node.id); pendingDelete = null }) { Text("确定删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("分类树管理") },
+        text = {
+            Column {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ManualTransactionType.entries.forEach { option ->
+                        FilterChip(selected = type == option, onClick = { type = option }, label = { Text(typeLabel(option)) })
+                    }
+                }
+                Text("长按分类后拖到另一分类：成为其子分类；同名则询问合并。", style = MaterialTheme.typography.bodySmall)
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+                        .onGloballyPositioned { bounds[rootTarget] = it.boundsInRoot() },
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(12.dp),
+                ) { Text("拖到这里成为一级分类", modifier = Modifier.padding(10.dp), textAlign = TextAlign.Center) }
+                LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
+                    items(treeRows, key = { it.node.id }) { item ->
+                        val node = item.node
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .onGloballyPositioned { bounds[node.id] = it.boundsInRoot() }
+                                .pointerInput(node.id, type) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = { local ->
+                                            draggedId = node.id
+                                            dragPosition = (bounds[node.id]?.topLeft ?: Offset.Zero) + local
+                                        },
+                                        onDrag = { change, amount ->
+                                            change.consume()
+                                            dragPosition = (dragPosition ?: Offset.Zero) + amount
+                                        },
+                                        onDragCancel = { draggedId = null; dragPosition = null },
+                                        onDragEnd = {
+                                            val sourceId = draggedId
+                                            val position = dragPosition
+                                            val targetKey = if (position == null) null else bounds.entries
+                                                .firstOrNull { (key, rect) -> key != sourceId && rect.contains(position) }?.key
+                                            val source = typed.firstOrNull { it.id == sourceId }
+                                            val target = typed.firstOrNull { it.id == targetKey }
+                                            if (source != null && targetKey == rootTarget) onMove(source.id, null)
+                                            else if (source != null && target != null) {
+                                                if (source.name == target.name) pendingMerge = source to target
+                                                else onMove(source.id, target.id)
+                                            }
+                                            draggedId = null
+                                            dragPosition = null
+                                        },
+                                    )
+                                }
+                                .background(if (draggedId == node.id) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        ) {
+                            Spacer(Modifier.width((item.depth * 18).dp))
+                            Icon(Icons.Default.DragIndicator, contentDescription = "拖动 ${node.name}", tint = MaterialTheme.colorScheme.secondary)
+                            Text(node.name, modifier = Modifier.weight(1f).padding(start = 8.dp))
+                            val directCount = rows.count { it.categoryId == node.id }
+                            if (directCount > 0) Text("$directCount 笔", style = MaterialTheme.typography.labelSmall)
+                            if (!node.isSystem) IconButton(onClick = { pendingDelete = node }) {
+                                Icon(Icons.Default.Delete, contentDescription = "删除 ${node.name}", tint = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+    )
+}
+
+@Composable
 private fun SyncSettingsPage(
     status: ManualSyncStatus,
+    categories: List<LedgerCategoryEntity>,
+    rows: List<ManualTransactionEntity>,
     onConfigure: (String, String) -> Unit,
     onDisconnect: () -> Unit,
     onSyncNow: () -> Unit,
+    onMoveCategory: (String, String?) -> Unit,
+    onMergeCategories: (String, String) -> Unit,
+    onDeleteCategory: (String) -> Unit,
 ) {
     var endpoint by androidx.compose.runtime.remember(status.endpoint) { mutableStateOf(status.endpoint) }
     var token by androidx.compose.runtime.remember { mutableStateOf("") }
+    var managingCategories by androidx.compose.runtime.remember { mutableStateOf(false) }
+    if (managingCategories) CategoryTreeManagerDialog(
+        categories = categories,
+        rows = rows,
+        onDismiss = { managingCategories = false },
+        onMove = onMoveCategory,
+        onMerge = onMergeCategories,
+        onDelete = onDeleteCategory,
+    )
     LazyColumn(modifier = Modifier.fillMaxWidth()) {
         item {
             Text("安全与同步", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
+            Button(onClick = { managingCategories = true }, modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
+                Icon(Icons.Default.DragIndicator, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("分类管理 · 长按拖动")
+            }
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = if (status.configured) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
@@ -1151,6 +1445,7 @@ private fun AnalysisPage(
     val highestDay = expenses.groupBy { Instant.ofEpochMilli(it.occurredAtMs).atZone(zone).toLocalDate() }
         .mapValues { (_, dayRows) -> dayRows.sumOf { it.amountCents } }.maxByOrNull { it.value }
     val largest = expenses.maxByOrNull { it.amountCents }
+    val dailySpending = LedgerInsights.dailySpending(expenses, month, zone)
     val mergedCount = expenses.count { resolveCategory(it) != it.category }
     var managingCategories by androidx.compose.runtime.remember { mutableStateOf(false) }
     var mappingSource by androidx.compose.runtime.remember { mutableStateOf<String?>(null) }
@@ -1233,6 +1528,12 @@ private fun AnalysisPage(
                 SummaryCard("最大单笔", largest?.let { money(it.amountCents) } ?: "暂无", Modifier.weight(1f))
             }
             peak?.let { Text("${it.label} 共 ${it.count} 笔，合计 ${money(it.amountCents)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(top = 6.dp)) }
+            Text("每日消费日历", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
+            SpendingCalendar(month, dailySpending)
+            Text("每日消费柱状图", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
+            DailySpendingBarChart(dailySpending)
+            Text("分类占比", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
+            CategoryPieChart(grouped.map { it.key to it.value })
             Text("月预算", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp))
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 OutlinedTextField(budgetText, { budgetText = it.take(14) }, label = { Text("预算金额") }, prefix = { Text("¥ ") }, singleLine = true, modifier = Modifier.weight(1f))
@@ -1276,6 +1577,96 @@ private fun persistCategoryMappings(context: android.content.Context, mappings: 
     val encoded = mappings.map { (key, target) -> "$key\t$target" }.toSet()
     context.getSharedPreferences("manual_settings", android.content.Context.MODE_PRIVATE)
         .edit().putStringSet("category_mappings", encoded).apply()
+}
+
+@Composable
+private fun SpendingCalendar(month: YearMonth, daily: List<LedgerInsights.DailySpend>) {
+    val firstOffset = month.atDay(1).dayOfWeek.value - 1
+    val maximum = daily.maxOfOrNull { it.amountCents }?.coerceAtLeast(1L) ?: 1L
+    val cells: List<LedgerInsights.DailySpend?> = List(firstOffset) { null } + daily
+    Column {
+        Row(modifier = Modifier.fillMaxWidth()) {
+            listOf("一", "二", "三", "四", "五", "六", "日").forEach { label ->
+                Text(label, modifier = Modifier.weight(1f), textAlign = TextAlign.Center, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        cells.chunked(7).forEach { week ->
+            Row(modifier = Modifier.fillMaxWidth()) {
+                week.forEach { day ->
+                    val intensity = day?.amountCents?.toFloat()?.div(maximum)?.coerceIn(0f, 1f) ?: 0f
+                    Surface(
+                        modifier = Modifier.weight(1f).padding(2.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (day == null) Color.Transparent else MaterialTheme.colorScheme.primary.copy(alpha = 0.07f + intensity * 0.45f),
+                    ) {
+                        Column(modifier = Modifier.padding(vertical = 6.dp), horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+                            Text(day?.dayOfMonth?.toString().orEmpty(), style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                day?.takeIf { it.amountCents > 0 }?.let { "%.0f".format(it.amountCents / 100.0) }.orEmpty(),
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+                repeat(7 - week.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DailySpendingBarChart(daily: List<LedgerInsights.DailySpend>) {
+    val maximum = daily.maxOfOrNull { it.amountCents }?.coerceAtLeast(1L) ?: 1L
+    val barColor = MaterialTheme.colorScheme.primary
+    Canvas(modifier = Modifier.fillMaxWidth().height(170.dp)) {
+        val baseline = size.height - 20.dp.toPx()
+        drawLine(Color(0xFFBBC9C3), Offset(0f, baseline), Offset(size.width, baseline), strokeWidth = 1.dp.toPx())
+        val slot = size.width / daily.size.coerceAtLeast(1)
+        daily.forEachIndexed { index, day ->
+            val height = (baseline - 8.dp.toPx()) * day.amountCents.toFloat() / maximum
+            drawRect(
+                color = barColor,
+                topLeft = Offset(index * slot + slot * 0.18f, baseline - height),
+                size = Size(slot * 0.64f, height.coerceAtLeast(if (day.amountCents > 0) 2.dp.toPx() else 0f)),
+            )
+        }
+    }
+    Text("横轴为日期，柱高代表当天支出", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+}
+
+@Composable
+private fun CategoryPieChart(categories: List<Pair<String, Long>>) {
+    val positive = categories.filter { it.second > 0 }
+    val top = positive.take(5)
+    val remainder = positive.drop(5).sumOf { it.second }
+    val visible = top + if (remainder > 0) listOf("其他分类" to remainder) else emptyList()
+    val total = visible.sumOf { it.second }
+    if (total <= 0) {
+        EmptyHint("本月暂无支出，分类饼图会在记账后生成")
+        return
+    }
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Canvas(modifier = Modifier.size(150.dp)) {
+            var start = -90f
+            visible.forEach { (name, amount) ->
+                val sweep = amount.toFloat() * 360f / total
+                drawArc(categoryColor(name), start, sweep, useCenter = false, style = Stroke(width = 28.dp.toPx()))
+                start += sweep
+            }
+        }
+        Column(modifier = Modifier.weight(1f).padding(start = 12.dp)) {
+            visible.forEach { (name, amount) ->
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        Box(Modifier.size(10.dp).background(categoryColor(name), CircleShape))
+                        Text(name, modifier = Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodySmall)
+                    }
+                    Text("${amount * 100 / total}%", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
 }
 
 @Composable
