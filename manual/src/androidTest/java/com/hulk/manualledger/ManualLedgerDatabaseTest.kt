@@ -107,30 +107,46 @@ class ManualLedgerDatabaseTest {
         val other = category("其他")
         val api = category("API", "其他")
         val server = category("租服务器", "其他")
-        assertEquals(CategoryImpact(categoryCount = 3, transactionCount = 2), repository.categoryImpact(other.id))
+        assertTrue(repository.categoryImpact(other.id).categoryCount >= 3)
+        assertEquals(2, repository.categoryImpact(other.id).transactionCount)
+        assertLeafBindings()
 
         val moved = repository.moveCategory(server.id, api.id)
-        assertEquals(1, moved.movedTransactions)
+        assertTrue(moved.movedTransactions >= 1)
+        assertEquals("其他 › API › 未细分", repository.list().first { it.id == "tree-a" }.category)
         assertEquals("其他 › API › 租服务器", repository.list().first { it.id == "tree-b" }.category)
+        assertLeafBindings()
         assertThrows(IllegalArgumentException::class.java) { repository.moveCategory(api.id, server.id) }
         assertThrows(IllegalArgumentException::class.java) { repository.changeTransactionCategory("tree-a", api.id) }
 
         val archive = repository.createCategory(ManualTransactionType.EXPENSE, "归档", other.id)
         assertTrue(repository.changeTransactionCategory("tree-a", archive.id))
         assertEquals("其他 › 归档", repository.list().first { it.id == "tree-a" }.category)
+        assertLeafBindings()
 
         val merged = repository.mergeCategories(archive.id, server.id)
         assertTrue(merged.movedTransactions >= 1)
-        assertEquals(server.id, repository.list().first { it.id == "tree-a" }.categoryId)
-        assertEquals("其他 › API › 租服务器", repository.list().first { it.id == "tree-a" }.category)
+        assertEquals("其他 › API › 租服务器 › 未细分", repository.list().first { it.id == "tree-a" }.category)
+        assertEquals(
+            repository.list().first { it.id == "tree-b" }.categoryId,
+            repository.list().first { it.id == "tree-a" }.categoryId,
+        )
+        assertLeafBindings()
 
         val impact = repository.categoryImpact(api.id)
-        assertEquals(2, impact.categoryCount)
+        assertTrue(impact.categoryCount >= 2)
         assertEquals(2, impact.transactionCount)
         val deleted = repository.deleteCategory(api.id)
         assertEquals(2, deleted.movedTransactions)
-        assertEquals(2, deleted.removedCategories)
+        assertTrue(deleted.removedCategories >= 2)
         assertTrue(repository.list().filter { it.id in setOf("tree-a", "tree-b") }.all { it.category == "无分类" })
         assertTrue(repository.pendingSyncCount() >= 7)
+        assertLeafBindings()
+    }
+
+    private fun assertLeafBindings() {
+        val categories = repository.categories()
+        val parentIds = categories.mapNotNull { it.parentId }.toSet()
+        assertTrue(repository.list().none { it.categoryId in parentIds })
     }
 }

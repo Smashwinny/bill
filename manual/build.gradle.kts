@@ -12,8 +12,8 @@ android {
         applicationId = "com.hulk.manualledger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "0.6.0-category-tree-analytics"
+        versionCode = 10
+        versionName = "0.6.1-visible-category-items"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
