@@ -208,4 +208,12 @@ class ManualLedgerContractTest {
         assertEquals("正在同步，待处理 3 条…", syncStartMessage(3, online = true))
         assertEquals("正在检查云端更新…", syncStartMessage(0, online = true))
     }
+
+    @Test
+    fun calendarCellsKeepCentPrecision() {
+        assertEquals("", calendarCellAmount(0))
+        assertEquals("12", calendarCellAmount(1200))
+        assertEquals("12.34", calendarCellAmount(1234))
+        assertEquals("0.05", calendarCellAmount(5))
+    }
 }

@@ -1653,6 +1653,15 @@ private fun persistCategoryMappings(context: android.content.Context, mappings: 
 
 @Composable
 private fun SpendingCalendar(month: YearMonth, daily: List<LedgerInsights.DailySpend>) {
+    var selectedDay by remember(month) { mutableStateOf<LedgerInsights.DailySpend?>(null) }
+    selectedDay?.let { day ->
+        AlertDialog(
+            onDismissRequest = { selectedDay = null },
+            title = { Text("${month.year} 年 ${month.monthValue} 月 ${day.dayOfMonth} 日") },
+            text = { Text("当日支出：${money(day.amountCents)}") },
+            confirmButton = { TextButton(onClick = { selectedDay = null }) { Text("知道了") } },
+        )
+    }
     val firstOffset = month.atDay(1).dayOfWeek.value - 1
     val maximum = daily.maxOfOrNull { it.amountCents }?.coerceAtLeast(1L) ?: 1L
     val cells: List<LedgerInsights.DailySpend?> = List(firstOffset) { null } + daily
@@ -1667,14 +1676,15 @@ private fun SpendingCalendar(month: YearMonth, daily: List<LedgerInsights.DailyS
                 week.forEach { day ->
                     val intensity = day?.amountCents?.toFloat()?.div(maximum)?.coerceIn(0f, 1f) ?: 0f
                     Surface(
-                        modifier = Modifier.weight(1f).padding(2.dp),
+                        modifier = Modifier.weight(1f).padding(2.dp)
+                            .then(if (day != null) Modifier.clickable { selectedDay = day } else Modifier),
                         shape = RoundedCornerShape(8.dp),
                         color = if (day == null) Color.Transparent else MaterialTheme.colorScheme.primary.copy(alpha = 0.07f + intensity * 0.45f),
                     ) {
                         Column(modifier = Modifier.padding(vertical = 6.dp), horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
                             Text(day?.dayOfMonth?.toString().orEmpty(), style = MaterialTheme.typography.labelMedium)
                             Text(
-                                day?.takeIf { it.amountCents > 0 }?.let { "%.0f".format(it.amountCents / 100.0) }.orEmpty(),
+                                day?.let { calendarCellAmount(it.amountCents) }.orEmpty(),
                                 style = MaterialTheme.typography.labelSmall,
                                 maxLines = 1,
                             )
@@ -1771,6 +1781,11 @@ internal fun syncStartMessage(pendingCount: Long, online: Boolean): String = whe
     !online -> "当前无网络，已排队等待联网后检查云端更新"
     pendingCount > 0 -> "正在同步，待处理 $pendingCount 条…"
     else -> "正在检查云端更新…"
+}
+internal fun calendarCellAmount(cents: Long): String = when {
+    cents <= 0 -> ""
+    cents % 100L == 0L -> (cents / 100L).toString()
+    else -> "%d.%02d".format(cents / 100L, kotlin.math.abs(cents % 100L))
 }
 private fun money(cents: Long): String = "¥%d.%02d".format(cents / 100, kotlin.math.abs(cents % 100))
 private fun typeLabel(type: ManualTransactionType): String = when (type) {
