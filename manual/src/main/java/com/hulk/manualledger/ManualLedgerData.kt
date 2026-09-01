@@ -149,7 +149,10 @@ data class NewManualTransaction(
     val targetAccount: String? = null,
     val occurredAtMs: Long = System.currentTimeMillis(),
     val note: String? = null,
+    val preserveCategoryPath: Boolean = false,
 )
+
+data class ImportStats(val inserted: Int, val enriched: Int, val unchanged: Int)
 
 class ManualLedgerRepository internal constructor(private val db: ManualLedgerDatabase) {
     fun add(input: NewManualTransaction): Boolean {
@@ -164,8 +167,10 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         return inserted
     }
 
-    fun import(rows: List<NewManualTransaction>): Int {
+    fun import(rows: List<NewManualTransaction>): ImportStats {
         var inserted = 0
+        var enriched = 0
+        var unchanged = 0
         val base = System.currentTimeMillis()
         db.runInTransaction {
             rows.forEachIndexed { index, input ->
@@ -173,10 +178,33 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
                 if (db.dao().insertTransactionIgnore(tx) != -1L) {
                     db.dao().insertOutbox(event)
                     inserted++
+                } else {
+                    val original = db.dao().findTransaction(tx.id)
+                    val changed = original != null && (
+                        original.type != tx.type || original.amountCents != tx.amountCents ||
+                            original.category != tx.category || original.account != tx.account ||
+                            original.targetAccount != tx.targetAccount || original.occurredAtMs != tx.occurredAtMs ||
+                            original.note != tx.note
+                        )
+                    val updated = original?.copy(
+                        type = tx.type,
+                        amountCents = tx.amountCents,
+                        category = tx.category,
+                        account = tx.account,
+                        targetAccount = tx.targetAccount,
+                        occurredAtMs = tx.occurredAtMs,
+                        note = tx.note,
+                        updatedAtMs = tx.updatedAtMs,
+                    )
+                    if (changed && updated != null) {
+                        db.dao().updateTransaction(updated)
+                        db.dao().insertOutbox(event.copy(payload = ManualLedgerMigrationCodec.transactionJson(updated)))
+                        enriched++
+                    } else unchanged++
                 }
             }
         }
-        return inserted
+        return ImportStats(inserted, enriched, unchanged)
     }
 
     private fun prepare(input: NewManualTransaction, now: Long): Pair<ManualTransactionEntity, SyncOutboxEntity> {
@@ -187,7 +215,8 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             id = input.stableId ?: UUID.randomUUID().toString(),
             type = input.type,
             amountCents = cents,
-            category = CategoryCatalog.normalize(input.type, input.category),
+            category = if (input.preserveCategoryPath) input.category.trim().take(80)
+                else CategoryCatalog.normalize(input.type, input.category),
             account = input.account.trim().take(40),
             targetAccount = input.targetAccount?.trim()?.take(40)?.ifBlank { null },
             occurredAtMs = input.occurredAtMs,

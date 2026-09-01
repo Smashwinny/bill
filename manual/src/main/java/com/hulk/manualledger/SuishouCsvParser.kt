@@ -90,7 +90,7 @@ object SuishouCsvParser {
             }
             val mainCategory = cell(categoryIndex)
             val subcategory = cell(subcategoryIndex)
-            val category = subcategory.ifBlank { mainCategory }.ifBlank { "未分类" }
+            val category = CategoryCatalog.sourcePath(mainCategory, subcategory)
             val account = cell(accountIndex).ifBlank { "默认账户" }
             val targetAccount = cell(targetAccountIndex).ifBlank { null }
             val note = noteIndices.map(::cell).filter { it.isNotBlank() && it != mainCategory && it != category }
@@ -101,6 +101,7 @@ object SuishouCsvParser {
                 type = type,
                 amountText = amount,
                 category = category,
+                preserveCategoryPath = true,
                 account = account,
                 targetAccount = targetAccount,
                 occurredAtMs = occurredAt,

@@ -56,4 +56,28 @@ class ManualLedgerDatabaseTest {
         assertTrue(repository.list().isEmpty())
         assertEquals(3, repository.pendingSyncCount())
     }
+
+    @Test
+    fun reimportEnrichesExistingHierarchyWithoutCreatingDuplicateTransaction() {
+        val base = NewManualTransaction(
+            stableId = "suishou-stable-id",
+            type = ManualTransactionType.EXPENSE,
+            amountText = "25.60",
+            category = "早餐",
+            account = "微信",
+            occurredAtMs = 1_700_000_000_000,
+            preserveCategoryPath = true,
+        )
+        val first = repository.import(listOf(base))
+        assertEquals(ImportStats(inserted = 1, enriched = 0, unchanged = 0), first)
+
+        val enriched = repository.import(listOf(base.copy(category = "食品酒水 › 早餐")))
+        assertEquals(ImportStats(inserted = 0, enriched = 1, unchanged = 0), enriched)
+        assertEquals(1, repository.list().size)
+        assertEquals("食品酒水 › 早餐", repository.list().single().category)
+
+        val repeated = repository.import(listOf(base.copy(category = "食品酒水 › 早餐")))
+        assertEquals(ImportStats(inserted = 0, enriched = 0, unchanged = 1), repeated)
+        assertEquals(2, repository.pendingSyncCount())
+    }
 }

@@ -26,8 +26,18 @@ object SuishouXlsxParser {
                 SuishouCsvParser.parse(rows.joinToString("\n") { row -> row.joinToString(",", transform = ::csvCell) })
             }
         require(candidates.isNotEmpty()) { "XLSX 中没有工作表" }
-        val best = candidates.maxWithOrNull(compareBy<SuishouImportResult> { it.rows.size }.thenBy { -it.rejectedRows })!!
-        return best.copy(sourceEncoding = "XLSX")
+        val validSheets = candidates.filter { it.rows.isNotEmpty() }
+        if (validSheets.isEmpty()) {
+            val bestFailure = candidates.minByOrNull { it.rejectedRows }!!
+            return bestFailure.copy(sourceEncoding = "XLSX")
+        }
+        val combined = validSheets.flatMap { it.rows }.distinctBy { it.stableId }
+        return SuishouImportResult(
+            rows = combined,
+            rejectedRows = validSheets.sumOf { it.rejectedRows },
+            rejectedReasons = validSheets.flatMap { it.rejectedReasons }.distinct().take(10),
+            sourceEncoding = "XLSX",
+        )
     }
 
     private fun unzip(bytes: ByteArray): Map<String, ByteArray> {

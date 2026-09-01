@@ -271,10 +271,9 @@ class MainActivity : ComponentActivity() {
         message = "正在导入到本地…"
         executor.execute {
             runCatching { repository.import(import.rows) }
-                .onSuccess { inserted ->
-                    val duplicates = import.rows.size - inserted
+                .onSuccess { stats ->
                     ManualSyncScheduler.syncNow(this)
-                    refresh("已导入 $inserted 条；重复 $duplicates 条；格式异常 ${import.rejectedRows} 条")
+                    refresh("新增 ${stats.inserted} 条；补全层级 ${stats.enriched} 条；未变化 ${stats.unchanged} 条；格式异常 ${import.rejectedRows} 条")
                 }
                 .onFailure { runOnUiThread { message = "导入失败：${it.message}" } }
         }
@@ -353,8 +352,12 @@ private fun ManualLedgerScreen(
 ) {
     val context = LocalContext.current
     var categoryMappings by androidx.compose.runtime.remember { mutableStateOf(loadCategoryMappings(context)) }
-    fun resolveCategory(row: ManualTransactionEntity): String =
-        categoryMappings[categoryMappingKey(row.type, row.category)] ?: CategoryCatalog.normalize(row.type, row.category)
+    fun resolveCategory(row: ManualTransactionEntity): String {
+        val hierarchy = CategoryCatalog.hierarchy(row.category)
+        return categoryMappings[categoryMappingKey(row.type, row.category)]
+            ?: hierarchy.second?.let { categoryMappings[categoryMappingKey(row.type, it)] }
+            ?: CategoryCatalog.normalize(row.type, row.category)
+    }
     fun saveCategoryMapping(type: ManualTransactionType, source: String, target: String) {
         categoryMappings = categoryMappings + (categoryMappingKey(type, source) to target)
         persistCategoryMappings(context, categoryMappings)
@@ -1079,7 +1082,11 @@ private fun AnalysisPage(
                     item { Text("选择原分类，再归入一个规范分类。只保存归类规则，不改写原始流水。", style = MaterialTheme.typography.bodySmall) }
                     items(sourceCategories, key = { it.key }) { source ->
                         TextButton(onClick = { managingCategories = false; mappingSource = source.key }, modifier = Modifier.fillMaxWidth()) {
-                            Text("${source.key}  ·  ${source.value.first} 笔  ·  ${money(source.value.second)}  →  ${resolveCategory(allExpenses.first { it.category == source.key })}", modifier = Modifier.fillMaxWidth())
+                            val hierarchy = CategoryCatalog.hierarchy(source.key)
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text("一级：${hierarchy.first}" + (hierarchy.second?.let { "  ·  二级：$it" } ?: "  ·  二级：—"), fontWeight = FontWeight.SemiBold)
+                                Text("${source.value.first} 笔  ·  ${money(source.value.second)}  →  ${resolveCategory(allExpenses.first { it.category == source.key })}", style = MaterialTheme.typography.bodySmall)
+                            }
                         }
                     }
                 }

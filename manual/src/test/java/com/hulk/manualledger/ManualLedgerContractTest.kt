@@ -49,7 +49,7 @@ class ManualLedgerContractTest {
         val result = SuishouCsvParser.parse(csv)
         assertEquals(0, result.rejectedRows)
         assertEquals(2, result.rows.size)
-        assertEquals("早餐", result.rows[0].category)
+        assertEquals("食品酒水 › 早餐", result.rows[0].category)
         assertEquals("第一行\n第二行", result.rows[0].note)
         assertEquals(ManualTransactionType.TRANSFER, result.rows[1].type)
         assertEquals("支付宝", result.rows[1].targetAccount)
@@ -84,7 +84,7 @@ class ManualLedgerContractTest {
 
     @Test
     fun suishouXlsxReadsSharedStringsAndExcelDates() {
-        val shared = listOf("日期", "类型", "金额", "分类", "账户", "支出", "16.00", "红包", "QQ")
+        val shared = listOf("日期", "类型", "金额", "分类", "账户", "支出", "16.00", "红包", "QQ", "收入", "88.00", "工资", "银行卡")
         val sharedXml = "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">" +
             shared.joinToString("") { "<si><t>$it</t></si>" } + "</sst>"
         val styles = """<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -93,6 +93,10 @@ class ManualLedgerContractTest {
             <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c><c r="E1" t="s"><v>4</v></c></row>
             <row r="2"><c r="A2" s="1"><v>46265</v></c><c r="B2" t="s"><v>5</v></c><c r="C2" t="s"><v>6</v></c><c r="D2" t="s"><v>7</v></c><c r="E2" t="s"><v>8</v></c></row>
             </sheetData></worksheet>"""
+        val incomeSheet = """<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+            <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c><c r="E1" t="s"><v>4</v></c></row>
+            <row r="2"><c r="A2" s="1"><v>46266</v></c><c r="B2" t="s"><v>9</v></c><c r="C2" t="s"><v>10</v></c><c r="D2" t="s"><v>11</v></c><c r="E2" t="s"><v>12</v></c></row>
+            </sheetData></worksheet>"""
         val output = ByteArrayOutputStream()
         ZipOutputStream(output).use { zip ->
             mapOf(
@@ -100,16 +104,18 @@ class ManualLedgerContractTest {
                 "xl/sharedStrings.xml" to sharedXml,
                 "xl/styles.xml" to styles,
                 "xl/worksheets/sheet1.xml" to sheet,
+                "xl/worksheets/sheet2.xml" to incomeSheet,
             ).forEach { (name, value) ->
                 zip.putNextEntry(ZipEntry(name)); zip.write(value.toByteArray()); zip.closeEntry()
             }
         }
         val result = SuishouImportParser.parse(output.toByteArray())
         assertEquals("XLSX", result.sourceEncoding)
-        assertEquals(1, result.rows.size)
-        assertEquals("16.00", result.rows.single().amountText)
-        assertEquals("红包", result.rows.single().category)
-        assertEquals("QQ", result.rows.single().account)
+        assertEquals(2, result.rows.size)
+        assertEquals(listOf(ManualTransactionType.EXPENSE, ManualTransactionType.INCOME), result.rows.map { it.type })
+        assertEquals(listOf("16.00", "88.00"), result.rows.map { it.amountText })
+        assertEquals("红包", result.rows.first().category)
+        assertEquals("QQ", result.rows.first().account)
     }
 
     @Test
