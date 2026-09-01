@@ -440,6 +440,7 @@ private fun ManualLedgerScreen(
                 account = account,
                 note = note,
                 occurredAtMs = occurredAtMs,
+                observedHierarchy = CategoryCatalog.observedHierarchy(rows.filter { it.type == type }.map { it.category }),
                 onType = { type = it; category = CategoryCatalog.defaultPath(it) },
                 onAmount = { amount = it.take(14) },
                 onCategory = { category = it.take(40) },
@@ -658,6 +659,7 @@ private fun RecordPage(
     account: String,
     note: String,
     occurredAtMs: Long,
+    observedHierarchy: Map<String, List<String>>,
     onType: (ManualTransactionType) -> Unit,
     onAmount: (String) -> Unit,
     onCategory: (String) -> Unit,
@@ -697,7 +699,7 @@ private fun RecordPage(
                         shape = RoundedCornerShape(16.dp),
                     )
                     Text("消费分类", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 14.dp))
-                    HierarchicalCategoryPicker(type, category, onCategory)
+                    HierarchicalCategoryPicker(type, category, observedHierarchy, onCategory)
                     OutlinedTextField(
                         account,
                         onAccount,
@@ -739,6 +741,7 @@ private fun FlowPage(
     editing?.let { row ->
         EditTransactionDialog(
             row = row,
+            allRows = rows,
             onDismiss = { editing = null },
             onSave = { input -> onEdit(row.id, input); editing = null },
         )
@@ -805,6 +808,7 @@ private fun TransactionRow(
 @Composable
 private fun EditTransactionDialog(
     row: ManualTransactionEntity,
+    allRows: List<ManualTransactionEntity>,
     onDismiss: () -> Unit,
     onSave: (NewManualTransaction) -> Unit,
 ) {
@@ -829,7 +833,11 @@ private fun EditTransactionDialog(
                     }
                 }
                 OutlinedTextField(amount, { amount = it.take(14) }, label = { Text("金额") }, singleLine = true)
-                HierarchicalCategoryPicker(type, category) { category = it }
+                HierarchicalCategoryPicker(
+                    type,
+                    category,
+                    CategoryCatalog.observedHierarchy(allRows.filter { it.type == type }.map { it.category }),
+                ) { category = it }
                 OutlinedTextField(account, { account = it.take(40) }, label = { Text("账户") }, singleLine = true)
                 TransactionDateButton(occurredAtMs) { occurredAtMs = it }
                 OutlinedTextField(note, { note = it.take(200) }, label = { Text("备注") })
@@ -858,10 +866,18 @@ private fun EditTransactionDialog(
 private fun HierarchicalCategoryPicker(
     type: ManualTransactionType,
     selected: String,
+    observedHierarchy: Map<String, List<String>> = emptyMap(),
     onSelected: (String) -> Unit,
 ) {
     val context = LocalContext.current
-    val hierarchy = CategoryCatalog.hierarchyOptions(type)
+    val hierarchy = linkedMapOf<String, List<String>>().apply {
+        CategoryCatalog.hierarchyOptions(type).forEach { (primary, children) ->
+            put(primary, (children + observedHierarchy[primary].orEmpty()).distinct())
+        }
+        observedHierarchy.forEach { (primary, children) ->
+            if (primary !in this) put(primary, children)
+        }
+    }
     val parsed = CategoryCatalog.hierarchy(selected)
     val selectedPrimary = when {
         parsed.first in hierarchy -> parsed.first

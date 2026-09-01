@@ -156,6 +156,12 @@ class ManualLedgerContractTest {
         assertEquals("饮食 › 餐饮", CategoryCatalog.defaultPath(ManualTransactionType.EXPENSE))
         assertEquals(listOf("餐饮", "早餐", "午餐", "晚餐", "外卖", "买菜", "零食", "饮料"),
             CategoryCatalog.hierarchyOptions(ManualTransactionType.EXPENSE).getValue("饮食"))
+        assertEquals(
+            mapOf("其他" to listOf("API", "租服务器"), "创业 001" to listOf("域名")),
+            CategoryCatalog.observedHierarchy(listOf(
+                "其他 › 租服务器", "其他 › API", "其他 › API", "创业 001 › 域名", "餐饮",
+            )),
+        )
     }
 
     @Test

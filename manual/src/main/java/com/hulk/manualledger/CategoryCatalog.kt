@@ -41,6 +41,20 @@ object CategoryCatalog {
         else -> defaults(type).associateWith { listOf(it) }
     }
 
+    fun observedHierarchy(categories: List<String>): Map<String, List<String>> {
+        val counts = linkedMapOf<String, MutableMap<String, Int>>()
+        categories.forEach { raw ->
+            val (primary, secondary) = hierarchy(raw)
+            if (primary.isBlank() || secondary.isNullOrBlank()) return@forEach
+            val children = counts.getOrPut(primary) { linkedMapOf() }
+            children[secondary] = (children[secondary] ?: 0) + 1
+        }
+        return counts.mapValues { (_, children) ->
+            children.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+                .map { it.key }
+        }
+    }
+
     fun defaultPath(type: ManualTransactionType): String {
         val primary = defaults(type).first()
         return sourcePath(primary, hierarchyOptions(type).getValue(primary).first())
