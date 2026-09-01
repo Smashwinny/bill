@@ -144,6 +144,26 @@ class ManualLedgerDatabaseTest {
         assertLeafBindings()
     }
 
+    @Test
+    fun deletedBuiltInCategoryStaysDeletedAndUncategorizedCannotBecomeAParent() {
+        repository.ensureCategoryTree()
+        val expenseCategories = repository.categories().filter { it.type == ManualTransactionType.EXPENSE }
+        val shopping = expenseCategories.first { it.name == "购物" && it.parentId == null }
+        val uncategorized = expenseCategories.first { it.isSystem && it.name == "无分类" }
+        val child = expenseCategories.first { it.parentId == shopping.id }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            repository.moveCategory(child.id, uncategorized.id)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            repository.createCategory(ManualTransactionType.EXPENSE, "错误子类", uncategorized.id)
+        }
+
+        repository.deleteCategory(shopping.id)
+        assertTrue(repository.categories().none { it.id == shopping.id })
+        assertTrue(repository.categories().none { it.parentId == shopping.id })
+    }
+
     private fun assertLeafBindings() {
         val categories = repository.categories()
         val parentIds = categories.mapNotNull { it.parentId }.toSet()

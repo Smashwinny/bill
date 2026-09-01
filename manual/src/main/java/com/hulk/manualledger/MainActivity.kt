@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -873,7 +874,8 @@ private fun TransactionRow(
     onDelete: (() -> Unit)? = null,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            .then(if (onChangeCategory != null) Modifier.clickable(onClick = onChangeCategory) else Modifier),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(18.dp),
     ) {
@@ -1274,7 +1276,7 @@ private fun CategoryTreeManagerDialog(
                                             val source = typed.firstOrNull { it.id == sourceId }
                                             val target = typed.firstOrNull { it.id == targetKey }
                                             if (source != null && targetKey == rootTarget) onMove(source.id, null)
-                                            else if (source != null && target != null) {
+                                            else if (source != null && target != null && !target.isSystem) {
                                                 if (source.name == target.name) pendingMerge = source to target
                                                 else onMove(source.id, target.id)
                                             }

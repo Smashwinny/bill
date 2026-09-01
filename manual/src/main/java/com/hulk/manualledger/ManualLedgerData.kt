@@ -338,6 +338,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         db.runInTransaction {
             val dao = db.dao()
             val categories = dao.listCategories().associateByTo(linkedMapOf()) { it.id }
+            val bootstrapDefaults = categories.isEmpty()
             val now = System.currentTimeMillis()
             fun ensure(type: ManualTransactionType, name: String, parentId: String?, order: Int, system: Boolean): String {
                 val existing = categories.values.firstOrNull { it.type == type && it.parentId == parentId && it.name == name }
@@ -350,10 +351,12 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             }
             ManualTransactionType.entries.forEach { type ->
                 ensure(type, UNCATEGORIZED_NAME, null, Int.MAX_VALUE, true)
-                CategoryCatalog.hierarchyOptions(type).entries.forEachIndexed { primaryOrder, entry ->
-                    val primaryId = ensure(type, entry.key, null, primaryOrder, false)
-                    entry.value.filter { it != entry.key }.forEachIndexed { childOrder, child ->
-                        ensure(type, child, primaryId, childOrder, false)
+                if (bootstrapDefaults) {
+                    CategoryCatalog.hierarchyOptions(type).entries.forEachIndexed { primaryOrder, entry ->
+                        val primaryId = ensure(type, entry.key, null, primaryOrder, false)
+                        entry.value.filter { it != entry.key }.forEachIndexed { childOrder, child ->
+                            ensure(type, child, primaryId, childOrder, false)
+                        }
                     }
                 }
             }
@@ -389,6 +392,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         val categories = db.dao().listCategories()
         val parent = parentId?.let { id -> categories.firstOrNull { it.id == id } ?: error("上级分类不存在") }
         require(parent == null || parent.type == type) { "上下级分类类型不一致" }
+        require(parent == null || !parent.isSystem) { "无分类不能包含子分类" }
         require(categories.none { it.type == type && it.parentId == parentId && it.name == clean }) { "同级已有同名分类" }
         val now = System.currentTimeMillis()
         val created = LedgerCategoryEntity(
@@ -414,11 +418,14 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             require(newParentId !in descendants) { "不能移动到自身或子分类下" }
             val parent = newParentId?.let { id -> categories.firstOrNull { it.id == id } ?: error("目标分类不存在") }
             require(parent == null || parent.type == source.type) { "只能在同一收支类型中移动" }
+            require(parent == null || !parent.isSystem) { "不能拖入无分类" }
             require(categories.none { it.id != source.id && it.parentId == newParentId && it.name == source.name }) {
                 "目标下存在同名分类，请使用合并"
             }
-            var additionallyMoved = rehomeDirectTransactionsToUnspecified(source.id, System.currentTimeMillis())
-            if (newParentId != null) additionallyMoved += rehomeDirectTransactionsToUnspecified(newParentId, System.currentTimeMillis())
+            // The moved node remains the leaf for its own direct transactions. Only the
+            // destination changes from a leaf into a parent and needs a leaf child.
+            val additionallyMoved = if (newParentId != null)
+                rehomeDirectTransactionsToUnspecified(newParentId, System.currentTimeMillis()) else 0
             dao.updateCategory(source.copy(parentId = newParentId, updatedAtMs = System.currentTimeMillis()))
             val rewritten = rewriteCategoryPaths(descendants)
             result = rewritten.copy(movedTransactions = rewritten.movedTransactions + additionallyMoved)
@@ -436,15 +443,13 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             val target = categories.firstOrNull { it.id == targetId } ?: error("目标分类不存在")
             require(source.id != target.id && source.type == target.type) { "只能合并同一类型的不同分类" }
             require(!source.isSystem) { "系统分类不能被合并" }
+            require(!target.isSystem) { "不能合并到无分类" }
             require(targetId !in descendantIds(sourceId, categories)) { "不能合并到自己的子分类" }
             val now = System.currentTimeMillis()
-            rehomeDirectTransactionsToUnspecified(targetId, now)
-            rehomeDirectTransactionsToUnspecified(sourceId, now)
-            val refreshed = dao.listCategories()
-            val directTarget = refreshed.firstOrNull { it.parentId == targetId && it.name == UNSPECIFIED_NAME }
-                ?: refreshed.first { it.id == targetId }
-            val directRows = dao.transactionsInCategories(listOf(sourceId))
-            directRows.forEachIndexed { index, row -> enqueueCategoryChange(row, directTarget, now + index) }
+            // The final target-subtree rewrite emits one sync event per affected row.
+            // During structural preparation update only category_id to avoid duplicate events.
+            rehomeDirectTransactionsToUnspecified(targetId, now, enqueueSync = false)
+            rehomeDirectTransactionsToUnspecified(sourceId, now, enqueueSync = false)
             val structural = dao.listCategories()
             val targetChildren = structural.filter { it.parentId == targetId }.associateBy { it.name }
             structural.filter { it.parentId == sourceId }.forEach { child ->
@@ -455,7 +460,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             dao.deleteCategories(listOf(sourceId))
             val affected = descendantIds(targetId, dao.listCategories())
             val rewritten = rewriteCategoryPaths(affected)
-            result = CategoryMutationResult(directRows.size + rewritten.movedTransactions, 1 + rewritten.removedCategories)
+            result = CategoryMutationResult(rewritten.movedTransactions, 1 + rewritten.removedCategories)
         }
         return result
     }
@@ -501,12 +506,9 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         var categories = dao.listCategories()
         require(categories.any { it.id == sourceId }) { "来源分类不存在" }
         val now = System.currentTimeMillis()
-        rehomeDirectTransactionsToUnspecified(targetId, now)
-        rehomeDirectTransactionsToUnspecified(sourceId, now)
+        rehomeDirectTransactionsToUnspecified(targetId, now, enqueueSync = false)
+        rehomeDirectTransactionsToUnspecified(sourceId, now, enqueueSync = false)
         categories = dao.listCategories()
-        val target = categories.firstOrNull { it.parentId == targetId && it.name == UNSPECIFIED_NAME }
-            ?: categories.first { it.id == targetId }
-        dao.transactionsInCategories(listOf(sourceId)).forEachIndexed { index, row -> enqueueCategoryChange(row, target, now + index) }
         val targetChildren = categories.filter { it.parentId == targetId }.associateBy { it.name }
         categories.filter { it.parentId == sourceId }.forEach { child ->
             targetChildren[child.name]?.let { mergeCategoryNodes(child.id, it.id) }
@@ -515,7 +517,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         dao.deleteCategories(listOf(sourceId))
     }
 
-    private fun rehomeDirectTransactionsToUnspecified(parentId: String, now: Long): Int {
+    private fun rehomeDirectTransactionsToUnspecified(parentId: String, now: Long, enqueueSync: Boolean = true): Int {
         val dao = db.dao()
         val directRows = dao.transactionsInCategories(listOf(parentId))
         if (directRows.isEmpty()) return 0
@@ -532,7 +534,10 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             createdAtMs = now,
             updatedAtMs = now,
         ).also { dao.insertCategoryIgnore(it) }
-        directRows.forEachIndexed { index, row -> enqueueCategoryChange(row, child, now + index) }
+        directRows.forEachIndexed { index, row ->
+            if (enqueueSync) enqueueCategoryChange(row, child, now + index)
+            else dao.updateTransaction(row.copy(categoryId = child.id))
+        }
         return directRows.size
     }
 
