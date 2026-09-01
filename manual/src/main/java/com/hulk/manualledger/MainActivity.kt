@@ -1222,11 +1222,25 @@ private fun CategoryTreeManagerDialog(
     }
     pendingDelete?.let { node ->
         val ids = categoryDescendantIds(node.id, typed)
-        val affected = rows.count { it.categoryId in ids }
+        val affectedRows = rows.filter { it.categoryId in ids }
+        val preview = affectedRows.take(6).joinToString("\n") { row ->
+            "${formatTime(row.occurredAtMs)}  ${money(row.amountCents)}  ${row.category}" +
+                row.note?.let { "  ·  ${it.take(24)}" }.orEmpty()
+        }
+        val remaining = (affectedRows.size - 6).coerceAtLeast(0)
+        val affectedSummary = buildString {
+            append("将删除 ${ids.size} 个分类节点。${affectedRows.size} 条历史账单将转入“无分类”。")
+            if (preview.isBlank()) append("\n\n当前没有受影响账单。")
+            else {
+                append("\n\n受影响账单：\n").append(preview)
+                if (remaining > 0) append("\n……另有 $remaining 条")
+            }
+            append("\n\n是否确定？")
+        }
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("删除“${node.name}”？") },
-            text = { Text("将删除 ${ids.size} 个分类节点。$affected 条历史账单会失去原分类并自动转入“无分类”。是否确定？") },
+            text = { Text(affectedSummary) },
             confirmButton = {
                 TextButton(onClick = { onDelete(node.id); pendingDelete = null }) { Text("确定删除", color = MaterialTheme.colorScheme.error) }
             },
