@@ -12,8 +12,8 @@ android {
         applicationId = "com.hulk.manualledger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 19
-        versionName = "0.7.0-suishou-time-and-category-text"
+        versionCode = 20
+        versionName = "0.8.0-interactive-analysis-and-editing"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

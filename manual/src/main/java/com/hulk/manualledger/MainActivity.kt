@@ -32,6 +32,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -851,7 +852,7 @@ private fun FlowPage(
     editing?.let { row ->
         EditTransactionDialog(
             row = row,
-            allRows = rows,
+            categoryNodes = categoryNodes,
             onDismiss = { editing = null },
             onSave = { input -> onEdit(row.id, input); editing = null },
         )
@@ -905,7 +906,7 @@ private fun TransactionRow(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-            .then(if (onChangeCategory != null) Modifier.clickable(onClick = onChangeCategory) else Modifier),
+            .then(if (onEdit != null) Modifier.clickable(onClick = onEdit) else Modifier),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(18.dp),
     ) {
@@ -918,7 +919,6 @@ private fun TransactionRow(
                 Text("${row.account} · ${formatTime(row.occurredAtMs)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
                 row.note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 if (onEdit != null || onChangeCategory != null || onDelete != null) Row {
-                    onEdit?.let { TextButton(onClick = it) { Text("编辑") } }
                     onChangeCategory?.let { TextButton(onClick = it) { Text("改分类") } }
                     onDelete?.let { TextButton(onClick = it) { Text("删除", color = MaterialTheme.colorScheme.error) } }
                 }
@@ -935,7 +935,7 @@ private fun TransactionRow(
 @Composable
 private fun EditTransactionDialog(
     row: ManualTransactionEntity,
-    allRows: List<ManualTransactionEntity>,
+    categoryNodes: List<LedgerCategoryEntity>,
     onDismiss: () -> Unit,
     onSave: (NewManualTransaction) -> Unit,
 ) {
@@ -945,29 +945,66 @@ private fun EditTransactionDialog(
     var account by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.account) }
     var note by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.note.orEmpty()) }
     var occurredAtMs by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.occurredAtMs) }
+    var choosingType by androidx.compose.runtime.remember(row.id) { mutableStateOf(false) }
+    var choosingCategory by androidx.compose.runtime.remember(row.id) { mutableStateOf(false) }
+    if (choosingType) AlertDialog(
+        onDismissRequest = { choosingType = false },
+        title = { Text("选择账单类型") },
+        text = {
+            Column {
+                ManualTransactionType.entries.forEach { option ->
+                    TextButton(
+                        onClick = {
+                            type = option
+                            category = CategoryCatalog.defaultPath(option)
+                            choosingType = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text((if (type == option) "✓  " else "") + typeLabel(option), modifier = Modifier.fillMaxWidth()) }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = { choosingType = false }) { Text("取消") } },
+    )
+    if (choosingCategory) {
+        val typed = categoryNodes.filter { it.type == type }
+        val selectedId = row.categoryId?.takeIf { id -> typed.any { it.id == id } }
+            ?: typed.firstOrNull { categoryNodePath(it.id, typed) == category }?.id
+        LeafCategoryDialog(
+            type = type,
+            categories = categoryNodes,
+            selectedId = selectedId,
+            onDismiss = { choosingCategory = false },
+            onSelect = { id ->
+                category = categoryNodePath(id, typed)
+                choosingCategory = false
+            },
+        )
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("编辑流水") },
         text = {
-            Column {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    ManualTransactionType.entries.forEach { option ->
-                        FilterChip(
-                            selected = type == option,
-                            onClick = { type = option; category = CategoryCatalog.defaultPath(option) },
-                            label = { Text(typeLabel(option)) },
-                        )
+            LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 560.dp)) {
+              item {
+                TextButton(onClick = { choosingType = true }, modifier = Modifier.fillMaxWidth()) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("账单类型", color = MaterialTheme.colorScheme.secondary)
+                        Text("${typeLabel(type)}  ›", fontWeight = FontWeight.SemiBold)
                     }
                 }
                 OutlinedTextField(amount, { amount = it.take(14) }, label = { Text("金额") }, singleLine = true)
-                HierarchicalCategoryPicker(
-                    type,
-                    category,
-                    CategoryCatalog.observedHierarchy(allRows.filter { it.type == type }.map { it.category }),
-                ) { category = it }
+                TextButton(onClick = { choosingCategory = true }, modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text("分类", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                        Text("$category  ›", fontWeight = FontWeight.SemiBold)
+                    }
+                }
                 OutlinedTextField(account, { account = it.take(40) }, label = { Text("账户") }, singleLine = true)
                 TransactionDateButton(occurredAtMs) { occurredAtMs = it }
                 OutlinedTextField(note, { note = it.take(200) }, label = { Text("备注") })
+              }
             }
         },
         confirmButton = {
@@ -1165,21 +1202,56 @@ private fun LeafCategoryDialog(
     onSelect: (String) -> Unit,
 ) {
     val typed = categories.filter { it.type == type }
+    val byId = typed.associateBy { it.id }
+    val roots = typed.filter { it.parentId == null }.sortedWith(compareBy<LedgerCategoryEntity> { it.sortOrder }.thenBy { it.name })
     val parentIds = typed.mapNotNull { it.parentId }.toSet()
     val leaves = typed.filter { it.id !in parentIds }.sortedBy { categoryNodePath(it.id, typed) }
+    fun rootId(id: String?): String? {
+        var node = id?.let(byId::get) ?: return null
+        val seen = mutableSetOf<String>()
+        while (node.parentId != null && seen.add(node.id)) node = byId[node.parentId] ?: break
+        return node.id
+    }
+    var selectedRootId by remember(type, selectedId, categories) {
+        mutableStateOf(rootId(selectedId) ?: roots.firstOrNull()?.id)
+    }
+    val visibleLeaves = leaves.filter { rootId(it.id) == selectedRootId }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("更改账单分类") },
         text = {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(leaves, key = { it.id }) { node ->
+                item {
+                    Text("一级分类", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                    roots.chunked(2).forEach { row ->
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            row.forEach { root ->
+                                FilterChip(
+                                    selected = root.id == selectedRootId,
+                                    onClick = { selectedRootId = root.id },
+                                    label = { Text(root.name, maxLines = 2) },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                            repeat(2 - row.size) { Spacer(Modifier.weight(1f)) }
+                        }
+                    }
+                    Text(
+                        "二级分类 · ${roots.firstOrNull { it.id == selectedRootId }?.name.orEmpty()}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                items(visibleLeaves, key = { it.id }) { node ->
                     FilterChip(
                         selected = node.id == selectedId,
                         onClick = { onSelect(node.id) },
-                        label = { Text(categoryNodePath(node.id, typed)) },
+                        label = { Text(node.name, maxLines = 2) },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
+                if (visibleLeaves.isEmpty()) item { EmptyHint("这个一级分类下还没有可用的二级分类，请先到设置中添加") }
             }
         },
         confirmButton = {},
@@ -1519,6 +1591,7 @@ private fun AnalysisPage(
     val largest = expenses.maxByOrNull { it.amountCents }
     val dailySpending = LedgerInsights.dailySpending(expenses, month, zone)
     val mergedCount = expenses.count { resolveCategory(it) != it.category }
+    var analysisView by androidx.compose.runtime.remember(month) { mutableStateOf(AnalysisView.TREND) }
     var managingCategories by androidx.compose.runtime.remember { mutableStateOf(false) }
     var mappingSource by androidx.compose.runtime.remember { mutableStateOf<String?>(null) }
     val allExpenses = allRows.filter { it.type == ManualTransactionType.EXPENSE }
@@ -1590,7 +1663,19 @@ private fun AnalysisPage(
                     }
                 }
             }
-            Text("消费习惯", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
+            Text("想看什么？", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AnalysisView.entries.forEach { view ->
+                    FilterChip(
+                        selected = analysisView == view,
+                        onClick = { analysisView = view },
+                        label = { Text(view.label) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            if (analysisView == AnalysisView.TREND) {
+            Text("消费习惯", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SummaryCard("消费高峰", peak?.label ?: "暂无数据", Modifier.weight(1f))
                 SummaryCard("周末消费占比", "$weekendShare%", Modifier.weight(1f))
@@ -1601,11 +1686,19 @@ private fun AnalysisPage(
             }
             peak?.let { Text("${it.label} 共 ${it.count} 笔，合计 ${money(it.amountCents)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(top = 6.dp)) }
             Text("每日消费日历", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
-            SpendingCalendar(month, dailySpending)
+            SpendingCalendar(month, dailySpending, expenses)
             Text("每日消费柱状图", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
-            DailySpendingBarChart(dailySpending)
+            DailySpendingBarChart(month, dailySpending)
+            }
+            if (analysisView == AnalysisView.CATEGORY) {
             Text("分类占比", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
             CategoryPieChart(grouped.map { it.key to it.value })
+            Text("支出分类", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
+            TextButton(onClick = { managingCategories = true }, enabled = sourceCategories.isNotEmpty()) { Text("整理随手记分类（${sourceCategories.size} 类）") }
+            if (mergedCount > 0) Text("已自动将 $mergedCount 笔相近分类归并统计（不会改动原始流水）", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            if (grouped.isEmpty()) Text("本月还没有支出数据")
+            }
+            if (analysisView == AnalysisView.BUDGET) {
             Text("月预算", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp))
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 OutlinedTextField(budgetText, { budgetText = it.take(14) }, label = { Text("预算金额") }, prefix = { Text("¥ ") }, singleLine = true, modifier = Modifier.weight(1f))
@@ -1617,12 +1710,10 @@ private fun AnalysisPage(
                 LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth())
                 Text(if (expense <= monthlyBudgetCents) "还可支出 ${money(monthlyBudgetCents - expense)}" else "已超预算 ${money(expense - monthlyBudgetCents)}")
             }
-            Text("支出分类", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
-            TextButton(onClick = { managingCategories = true }, enabled = sourceCategories.isNotEmpty()) { Text("整理随手记分类（${sourceCategories.size} 类）") }
-            if (mergedCount > 0) Text("已自动将 $mergedCount 笔相近分类归并统计（不会改动原始流水）", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-            if (grouped.isEmpty()) Text("本月还没有支出数据")
+            if (monthlyBudgetCents <= 0) EmptyHint("设置一个月预算后，这里会持续显示可用额度和超支风险")
+            }
         }
-        items(grouped, key = { it.key }) { item ->
+        if (analysisView == AnalysisView.CATEGORY) items(grouped, key = { it.key }) { item ->
             val ratio = if (expense == 0L) 0f else item.value.toFloat() / expense
             Column(modifier = Modifier.padding(vertical = 7.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1634,6 +1725,10 @@ private fun AnalysisPage(
         }
         item { Spacer(Modifier.height(16.dp)) }
     }
+}
+
+private enum class AnalysisView(val label: String) {
+    TREND("趋势"), CATEGORY("分类"), BUDGET("预算")
 }
 
 private fun categoryMappingKey(type: ManualTransactionType, source: String): String = "${type.name}\t${source.trim()}"
@@ -1652,13 +1747,26 @@ private fun persistCategoryMappings(context: android.content.Context, mappings: 
 }
 
 @Composable
-private fun SpendingCalendar(month: YearMonth, daily: List<LedgerInsights.DailySpend>) {
+private fun SpendingCalendar(
+    month: YearMonth,
+    daily: List<LedgerInsights.DailySpend>,
+    expenses: List<ManualTransactionEntity>,
+) {
     var selectedDay by remember(month) { mutableStateOf<LedgerInsights.DailySpend?>(null) }
     selectedDay?.let { day ->
         AlertDialog(
             onDismissRequest = { selectedDay = null },
             title = { Text("${month.year} 年 ${month.monthValue} 月 ${day.dayOfMonth} 日") },
-            text = { Text("当日支出：${money(day.amountCents)}") },
+            text = {
+                val dayRows = expenses.filter {
+                    Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault()).dayOfMonth == day.dayOfMonth
+                }.sortedByDescending { it.amountCents }
+                Column {
+                    Text("当日支出：${money(day.amountCents)} · ${dayRows.size} 笔")
+                    dayRows.take(5).forEach { Text("${it.category}  ${money(it.amountCents)}", modifier = Modifier.padding(top = 6.dp)) }
+                    if (dayRows.size > 5) Text("还有 ${dayRows.size - 5} 笔，可到流水页查看", style = MaterialTheme.typography.bodySmall)
+                }
+            },
             confirmButton = { TextButton(onClick = { selectedDay = null }) { Text("知道了") } },
         )
     }
@@ -1698,10 +1806,26 @@ private fun SpendingCalendar(month: YearMonth, daily: List<LedgerInsights.DailyS
 }
 
 @Composable
-private fun DailySpendingBarChart(daily: List<LedgerInsights.DailySpend>) {
+private fun DailySpendingBarChart(month: YearMonth, daily: List<LedgerInsights.DailySpend>) {
+    var selected by remember(month) { mutableStateOf<LedgerInsights.DailySpend?>(null) }
+    selected?.let { day ->
+        AlertDialog(
+            onDismissRequest = { selected = null },
+            title = { Text("${month.monthValue} 月 ${day.dayOfMonth} 日") },
+            text = { Text("当天支出 ${money(day.amountCents)}。点击日历中的同一天可查看账单明细。") },
+            confirmButton = { TextButton(onClick = { selected = null }) { Text("知道了") } },
+        )
+    }
     val maximum = daily.maxOfOrNull { it.amountCents }?.coerceAtLeast(1L) ?: 1L
     val barColor = MaterialTheme.colorScheme.primary
-    Canvas(modifier = Modifier.fillMaxWidth().height(170.dp)) {
+    Canvas(modifier = Modifier.fillMaxWidth().height(170.dp).pointerInput(daily) {
+        detectTapGestures { offset ->
+            if (daily.isNotEmpty()) {
+                val index = (offset.x / (size.width / daily.size)).toInt().coerceIn(0, daily.lastIndex)
+                selected = daily[index]
+            }
+        }
+    }) {
         val baseline = size.height - 20.dp.toPx()
         drawLine(Color(0xFFBBC9C3), Offset(0f, baseline), Offset(size.width, baseline), strokeWidth = 1.dp.toPx())
         val slot = size.width / daily.size.coerceAtLeast(1)
@@ -1724,6 +1848,15 @@ private fun CategoryPieChart(categories: List<Pair<String, Long>>) {
     val remainder = positive.drop(5).sumOf { it.second }
     val visible = top + if (remainder > 0) listOf("其他分类" to remainder) else emptyList()
     val total = visible.sumOf { it.second }
+    var selected by remember(categories) { mutableStateOf<Pair<String, Long>?>(null) }
+    selected?.let { item ->
+        AlertDialog(
+            onDismissRequest = { selected = null },
+            title = { Text(item.first) },
+            text = { Text("本月支出 ${money(item.second)}，占总支出 ${item.second * 100 / total}%。") },
+            confirmButton = { TextButton(onClick = { selected = null }) { Text("知道了") } },
+        )
+    }
     if (total <= 0) {
         EmptyHint("本月暂无支出，分类饼图会在记账后生成")
         return
@@ -1739,7 +1872,10 @@ private fun CategoryPieChart(categories: List<Pair<String, Long>>) {
         }
         Column(modifier = Modifier.weight(1f).padding(start = 12.dp)) {
             visible.forEach { (name, amount) ->
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable { selected = name to amount }.padding(vertical = 5.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         Box(Modifier.size(10.dp).background(categoryColor(name), CircleShape))
                         Text(name, modifier = Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodySmall)
