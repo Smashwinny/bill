@@ -42,6 +42,15 @@ class ManualLedgerContractTest {
     }
 
     @Test
+    fun suishouCsvCombinesSeparateDateAndTimeColumns() {
+        val csv = "日期,时间,类型,金额,分类,账户\n" +
+            "2026-08-31,07:46:12,支出,16.00,红包,QQ"
+        val row = SuishouCsvParser.parse(csv).rows.single()
+        val local = java.time.Instant.ofEpochMilli(row.occurredAtMs).atZone(ZoneId.systemDefault())
+        assertEquals(LocalDateTime.of(2026, 8, 31, 7, 46, 12), local.toLocalDateTime())
+    }
+
+    @Test
     fun suishouCsvSupportsSplitAmountsSubcategoryTransferAccountAndMultilineNotes() {
         val csv = "日期,交易类型,支出金额,收入金额,一级分类,二级分类,账户1,账户2,备注\n" +
             "2026-08-30,支出,25.60,,食品酒水,早餐,微信,,\"第一行\n第二行\"\n" +
@@ -91,7 +100,7 @@ class ManualLedgerContractTest {
             <cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>"""
         val sheet = """<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
             <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c><c r="E1" t="s"><v>4</v></c></row>
-            <row r="2"><c r="A2" s="1"><v>46265</v></c><c r="B2" t="s"><v>5</v></c><c r="C2" t="s"><v>6</v></c><c r="D2" t="s"><v>7</v></c><c r="E2" t="s"><v>8</v></c></row>
+            <row r="2"><c r="A2" s="1"><v>46265.32375</v></c><c r="B2" t="s"><v>5</v></c><c r="C2" t="s"><v>6</v></c><c r="D2" t="s"><v>7</v></c><c r="E2" t="s"><v>8</v></c></row>
             </sheetData></worksheet>"""
         val incomeSheet = """<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
             <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c><c r="E1" t="s"><v>4</v></c></row>
@@ -116,6 +125,8 @@ class ManualLedgerContractTest {
         assertEquals(listOf("16.00", "88.00"), result.rows.map { it.amountText })
         assertEquals("红包", result.rows.first().category)
         assertEquals("QQ", result.rows.first().account)
+        val local = java.time.Instant.ofEpochMilli(result.rows.first().occurredAtMs).atZone(ZoneId.systemDefault())
+        assertEquals(LocalDateTime.of(2026, 8, 31, 7, 46, 12), local.toLocalDateTime())
     }
 
     @Test

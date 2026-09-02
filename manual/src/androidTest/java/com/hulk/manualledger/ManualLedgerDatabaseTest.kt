@@ -49,13 +49,13 @@ class ManualLedgerDatabaseTest {
         assertTrue(repository.update(id, original.copy(amountText = "23.45", category = "交通", note = "已修改")))
         val edited = repository.list().single()
         assertEquals(2345, edited.amountCents)
-        assertEquals("出行", edited.category)
+        assertEquals("出行 › 未细分", edited.category)
         assertEquals("已修改", edited.note)
-        assertEquals(2, repository.pendingSyncCount())
+        assertEquals(1, repository.pendingSyncCount())
 
         repository.delete(id)
         assertTrue(repository.list().isEmpty())
-        assertEquals(3, repository.pendingSyncCount())
+        assertEquals(1, repository.pendingSyncCount())
     }
 
     @Test
@@ -79,7 +79,7 @@ class ManualLedgerDatabaseTest {
 
         val repeated = repository.import(listOf(base.copy(category = "食品酒水 › 早餐")))
         assertEquals(ImportStats(inserted = 0, enriched = 0, unchanged = 1), repeated)
-        assertEquals(2, repository.pendingSyncCount())
+        assertEquals(1, repository.pendingSyncCount())
     }
 
     @Test
@@ -117,18 +117,18 @@ class ManualLedgerDatabaseTest {
         assertEquals("其他 › API › 未细分", repository.list().first { it.id == "tree-a" }.category)
         assertEquals("其他 › API › 租服务器", repository.list().first { it.id == "tree-b" }.category)
         assertLeafBindings()
-        assertEquals(4, repository.pendingSyncCount())
+        assertEquals(2, repository.pendingSyncCount())
         assertEquals(CategoryMutationResult(0), repository.moveCategory(server.id, api.id))
-        assertEquals(4, repository.pendingSyncCount())
+        assertEquals(2, repository.pendingSyncCount())
         assertThrows(IllegalArgumentException::class.java) { repository.moveCategory(api.id, server.id) }
         assertThrows(IllegalArgumentException::class.java) { repository.changeTransactionCategory("tree-a", api.id) }
-        assertEquals(4, repository.pendingSyncCount())
+        assertEquals(2, repository.pendingSyncCount())
 
         val archive = repository.createCategory(ManualTransactionType.EXPENSE, "归档", other.id)
         assertTrue(repository.changeTransactionCategory("tree-a", archive.id))
         assertEquals("其他 › 归档", repository.list().first { it.id == "tree-a" }.category)
         assertLeafBindings()
-        assertEquals(5, repository.pendingSyncCount())
+        assertEquals(2, repository.pendingSyncCount())
 
         val merged = repository.mergeCategories(archive.id, server.id)
         assertEquals(2, merged.movedTransactions)
@@ -138,7 +138,7 @@ class ManualLedgerDatabaseTest {
             repository.list().first { it.id == "tree-a" }.categoryId,
         )
         assertLeafBindings()
-        assertEquals(7, repository.pendingSyncCount())
+        assertEquals(2, repository.pendingSyncCount())
 
         val impact = repository.categoryImpact(api.id)
         assertTrue(impact.categoryCount >= 2)
@@ -147,7 +147,7 @@ class ManualLedgerDatabaseTest {
         assertEquals(2, deleted.movedTransactions)
         assertTrue(deleted.removedCategories >= 2)
         assertTrue(repository.list().filter { it.id in setOf("tree-a", "tree-b") }.all { it.category == "无分类" })
-        assertEquals(9, repository.pendingSyncCount())
+        assertEquals(2, repository.pendingSyncCount())
         assertLeafBindings()
     }
 

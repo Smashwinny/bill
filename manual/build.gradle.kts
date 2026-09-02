@@ -12,8 +12,8 @@ android {
         applicationId = "com.hulk.manualledger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 18
-        versionName = "0.6.9-exact-daily-spending"
+        versionCode = 19
+        versionName = "0.7.0-suishou-time-and-category-text"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -25,6 +25,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     lint { abortOnError = true }
+    sourceSets.getByName("androidTest").assets.srcDir("$projectDir/schemas")
 }
 
 ksp { arg("room.schemaLocation", "$projectDir/schemas") }

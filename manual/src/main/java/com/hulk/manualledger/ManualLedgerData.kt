@@ -132,6 +132,15 @@ abstract class ManualLedgerDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract fun insertOutbox(entity: SyncOutboxEntity)
 
+    @Query("DELETE FROM sync_outbox WHERE transaction_id = :transactionId AND state = 'PENDING'")
+    abstract fun deletePendingOutbox(transactionId: String): Int
+
+    @Transaction
+    open fun enqueueLatestOutbox(entity: SyncOutboxEntity) {
+        deletePendingOutbox(entity.transactionId)
+        insertOutbox(entity)
+    }
+
     @Query("SELECT * FROM manual_transaction ORDER BY occurred_at_ms DESC, created_at_ms DESC")
     abstract fun listTransactions(): List<ManualTransactionEntity>
 
@@ -245,7 +254,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         var inserted = false
         db.runInTransaction {
             if (db.dao().insertTransactionIgnore(tx) != -1L) {
-                db.dao().insertOutbox(event)
+                db.dao().enqueueLatestOutbox(event)
                 inserted = true
             }
         }
@@ -262,7 +271,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             rows.forEachIndexed { index, input ->
                 val (tx, event) = prepare(input, base + index)
                 if (db.dao().insertTransactionIgnore(tx) != -1L) {
-                    db.dao().insertOutbox(event)
+                    db.dao().enqueueLatestOutbox(event)
                     inserted++
                 } else {
                     val original = db.dao().findTransaction(tx.id)
@@ -285,7 +294,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
                     )
                     if (changed && updated != null) {
                         db.dao().updateTransaction(updated)
-                        db.dao().insertOutbox(event.copy(payload = ManualLedgerMigrationCodec.transactionJson(updated)))
+                        db.dao().enqueueLatestOutbox(event.copy(payload = ManualLedgerMigrationCodec.transactionJson(updated)))
                         enriched++
                     } else unchanged++
                 }
@@ -575,7 +584,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
     ) {
         val updated = original.copy(categoryId = target.id, category = categoryPath(target.id, categories), updatedAtMs = now)
         db.dao().updateTransaction(updated)
-        db.dao().insertOutbox(SyncOutboxEntity(
+        db.dao().enqueueLatestOutbox(SyncOutboxEntity(
             UUID.randomUUID().toString(), updated.id, ManualLedgerMigrationCodec.transactionJson(updated),
             OutboxState.PENDING, 0, now, now,
         ))
@@ -616,7 +625,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             createdAtMs = now,
         )
         db.runInTransaction {
-            if (db.dao().deleteTransaction(id) > 0) db.dao().insertOutbox(event)
+            if (db.dao().deleteTransaction(id) > 0) db.dao().enqueueLatestOutbox(event)
         }
     }
 
@@ -650,7 +659,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         var changed = false
         db.runInTransaction {
             if (db.dao().updateTransaction(updated) > 0) {
-                db.dao().insertOutbox(event)
+                db.dao().enqueueLatestOutbox(event)
                 changed = true
             }
         }

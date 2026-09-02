@@ -1022,31 +1022,31 @@ private fun HierarchicalCategoryPicker(
     var draft by androidx.compose.runtime.remember(type, selectedPrimary) { mutableStateOf("") }
 
     Text("一级分类", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
-    hierarchy.keys.chunked(4).forEach { row ->
+    hierarchy.keys.chunked(2).forEach { row ->
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             row.forEach { primary ->
                 FilterChip(
                     modifier = Modifier.weight(1f),
                     selected = selectedPrimary == primary,
                     onClick = { onSelected(CategoryCatalog.sourcePath(primary, hierarchy.getValue(primary).first())) },
-                    label = { Text(primary, maxLines = 1) },
+                    label = { Text(primary, maxLines = 2) },
                 )
             }
-            repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+            repeat(2 - row.size) { Spacer(Modifier.weight(1f)) }
         }
     }
     Text("二级分类 · $selectedPrimary", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
-    children.chunked(4).forEach { row ->
+    children.chunked(2).forEach { row ->
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             row.forEach { secondary ->
                 FilterChip(
                     modifier = Modifier.weight(1f),
                     selected = selectedSecondary == secondary,
                     onClick = { onSelected(CategoryCatalog.sourcePath(selectedPrimary, secondary)) },
-                    label = { Text(secondary, maxLines = 1) },
+                    label = { Text(secondary, maxLines = 2) },
                 )
             }
-            repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+            repeat(2 - row.size) { Spacer(Modifier.weight(1f)) }
         }
     }
     TextButton(onClick = { draft = ""; adding = true }) { Text("＋ 在“$selectedPrimary”下添加二级分类") }
@@ -1084,17 +1084,17 @@ private fun CategoryPicker(
     var adding by androidx.compose.runtime.remember(type) { mutableStateOf(false) }
     var draft by androidx.compose.runtime.remember(type) { mutableStateOf("") }
     val options = (CategoryCatalog.options(type, custom) + selected).filter { it.isNotBlank() }.distinct()
-    options.chunked(4).forEach { row ->
+    options.chunked(2).forEach { row ->
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             row.forEach { item ->
                 FilterChip(
                     modifier = Modifier.weight(1f),
                     selected = selected == item,
                     onClick = { onSelected(item) },
-                    label = { Text(item, maxLines = 1) },
+                    label = { Text(item, maxLines = 2) },
                 )
             }
-            repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+            repeat(2 - row.size) { Spacer(Modifier.weight(1f)) }
         }
     }
     TextButton(onClick = { draft = ""; adding = true }) { Text("＋ 添加自定义分类") }

@@ -3,7 +3,7 @@ package com.hulk.manualledger
 import org.w3c.dom.Document
 import org.w3c.dom.Element
 import java.io.ByteArrayInputStream
-import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.zip.ZipInputStream
 import javax.xml.parsers.DocumentBuilderFactory
@@ -144,8 +144,11 @@ object SuishouXlsxParser {
 
     private fun excelDate(raw: String): String {
         val serial = raw.toDoubleOrNull() ?: return raw
-        val date = LocalDate.of(1899, 12, 30).plusDays(serial.toLong())
-        return date.format(DateTimeFormatter.ISO_LOCAL_DATE)
+        val wholeDays = kotlin.math.floor(serial).toLong()
+        val seconds = kotlin.math.round((serial - wholeDays) * 86_400.0).toLong()
+        val dateTime = LocalDateTime.of(1899, 12, 30, 0, 0).plusDays(wholeDays).plusSeconds(seconds)
+        return if (seconds == 0L) dateTime.toLocalDate().format(DateTimeFormatter.ISO_LOCAL_DATE)
+        else dateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
     }
 
     private fun csvCell(value: String): String = if (value.any { it == ',' || it == '"' || it == '\n' || it == '\r' }) {

@@ -1,6 +1,6 @@
 # 手动账本分类树真机验收
 
-适用版本：`0.6.9-exact-daily-spending`（versionCode 18）及后续版本。
+适用版本：`0.7.0-suishou-time-and-category-text`（versionCode 19）及后续版本。
 
 本清单验证分类树、历史账单联动、分析图表和同步按钮。覆盖安装不得卸载应用或清除数据，验收前先备份当前账本。
 

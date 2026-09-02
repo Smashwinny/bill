@@ -39,7 +39,9 @@ object SuishouCsvParser {
         val header = records.first().map(::normalizeHeader)
         fun index(vararg names: String): Int = header.indexOfFirst { cell -> names.any { normalizeHeader(it) == cell } }
 
-        val dateIndex = index("日期", "时间", "交易时间", "发生时间", "记账时间")
+        val dateIndex = index("日期")
+        val timeIndex = index("时间")
+        val timestampIndex = index("交易时间", "发生时间", "记账时间")
         val typeIndex = index("类型", "收支类型", "交易类型")
         val amountIndex = index("金额", "交易金额", "金额(元)", "金额（元）")
         val expenseIndex = index("支出金额", "支出", "支出(元)", "支出（元）")
@@ -51,9 +53,10 @@ object SuishouCsvParser {
         val noteIndices = listOf(index("备注", "说明"), index("商家", "交易对象"), index("项目"), index("成员"))
             .filter { it >= 0 }.distinct()
 
-        if (dateIndex < 0 || (amountIndex < 0 && expenseIndex < 0 && incomeIndex < 0)) {
+        if (dateIndex < 0 && timeIndex < 0 && timestampIndex < 0 ||
+            amountIndex < 0 && expenseIndex < 0 && incomeIndex < 0) {
             val missing = buildList {
-                if (dateIndex < 0) add("日期列")
+                if (dateIndex < 0 && timeIndex < 0 && timestampIndex < 0) add("日期或时间列")
                 if (amountIndex < 0 && expenseIndex < 0 && incomeIndex < 0) add("金额列")
             }.joinToString("、")
             return SuishouImportResult(emptyList(), records.size - 1, listOf("缺少$missing，请选择随手记导出的流水 CSV"))
@@ -63,10 +66,19 @@ object SuishouCsvParser {
         val reasons = linkedSetOf<String>()
         val rows = records.drop(1).mapIndexedNotNull { rowIndex, cells ->
             fun cell(at: Int): String = cells.getOrNull(at)?.trim().orEmpty()
-            val occurredAt = parseDate(cell(dateIndex))
+            val dateRaw = cell(dateIndex)
+            val timeRaw = cell(timeIndex)
+            val timestampRaw = cell(timestampIndex)
+            val occurredAt = sequenceOf(
+                timestampRaw,
+                listOf(dateRaw, timeRaw).filter(String::isNotBlank).joinToString(" "),
+                dateRaw,
+                timeRaw,
+            ).filter(String::isNotBlank).mapNotNull(::parseDate).firstOrNull()
             if (occurredAt == null) {
                 rejected++
-                if (reasons.size < 5) reasons += "第 ${rowIndex + 2} 行日期无法识别：${cell(dateIndex).take(24)}"
+                val raw = listOf(timestampRaw, dateRaw, timeRaw).filter(String::isNotBlank).joinToString(" ")
+                if (reasons.size < 5) reasons += "第 ${rowIndex + 2} 行日期无法识别：${raw.take(24)}"
                 return@mapIndexedNotNull null
             }
             val explicitType = cell(typeIndex)
