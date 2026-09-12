@@ -9,9 +9,9 @@
     <application
         android:name=".ManualLedgerApp"
         android:allowBackup="true"
-        android:icon="@drawable/ic_launcher_art"
+        android:icon="@mipmap/ic_launcher"
         android:label="本地账本"
-        android:roundIcon="@drawable/ic_launcher_art"
+        android:roundIcon="@mipmap/ic_launcher"
         android:theme="@style/Theme.ManualLedger">
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -31,10 +31,6 @@
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-            <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
@@ -45,5 +41,34 @@
                 <data android:mimeType="application/vnd.ms-excel" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".LauncherActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:taskAffinity=""
+            android:noHistory="true"
+            android:excludeFromRecents="true" />
+        <activity-alias
+            android:name="${applicationId}.launcher.Red"
+            android:targetActivity=".LauncherActivity"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name="${applicationId}.launcher.Green"
+            android:targetActivity=".LauncherActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_green">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
     </application>
 </manifest>

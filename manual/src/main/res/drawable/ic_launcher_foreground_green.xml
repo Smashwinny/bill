@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Keep the ledger inside the adaptive icon safe zone for round and squircle launchers. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,29 L69,29 Q76,29 76,36 L76,72 Q76,79 69,79 L40,79 Q33,79 33,72 L33,36 Q33,29 40,29 Z" />
+    <path
+        android:fillColor="@color/launcher_green"
+        android:pathData="M42,34 L45,34 L45,74 L42,74 Z" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="@color/launcher_green"
+        android:strokeWidth="3.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M51,44 L59,54 L67,44 M51,55 L67,55 M51,61 L67,61 M59,54 L59,69" />
+</vector>

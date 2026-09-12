@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -60,6 +61,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -81,7 +83,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -107,6 +112,7 @@ class MainActivity : ComponentActivity() {
     private var message by mutableStateOf("本地数据库已就绪")
     private var pendingImport by mutableStateOf<SuishouImportResult?>(null)
     private var monthlyBudgetCents by mutableStateOf(0L)
+    private var skin by mutableStateOf(LedgerSkin.RED)
     private var exportPayload: String? = null
     private var syncStatus by mutableStateOf(ManualSyncStatus(false, "https://bill.geniusqi.com/v1/sync", 0L, null))
     private val ledgerObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
@@ -131,11 +137,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        skin = LedgerSkinSettings.load(this)
+        updateSystemBarColors()
         repository = ManualLedgerRepository.open(this)
         monthlyBudgetCents = getSharedPreferences("manual_settings", MODE_PRIVATE)
             .getLong("monthly_budget_cents", 0L)
         setContent {
-            MaterialTheme(colorScheme = LedgerColorScheme) {
+            MaterialTheme(colorScheme = if (skin == LedgerSkin.RED) RedLedgerColorScheme else LedgerColorScheme) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     ManualLedgerScreen(
                         rows = rows,
@@ -166,6 +174,12 @@ class MainActivity : ComponentActivity() {
                         onMergeCategories = ::mergeCategories,
                         onDeleteCategory = ::deleteCategory,
                         onChangeTransactionCategory = ::changeTransactionCategory,
+                        skin = skin,
+                        onSkinChange = { selected ->
+                            runCatching { LedgerSkinSettings.select(this, selected) }
+                                .onSuccess { skin = selected; updateSystemBarColors(); message = "已切换为${selected.label}皮肤" }
+                                .onFailure { message = "皮肤切换失败：${it.message}" }
+                        },
                     )
                 }
             }
@@ -179,6 +193,12 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleImportIntent(intent)
+    }
+
+    private fun updateSystemBarColors() {
+        val scheme = if (skin == LedgerSkin.RED) RedLedgerColorScheme else LedgerColorScheme
+        window.statusBarColor = scheme.background.toArgb()
+        window.navigationBarColor = scheme.surface.toArgb()
     }
 
     override fun onResume() {
@@ -407,6 +427,18 @@ private val LedgerColorScheme = lightColorScheme(
     error = Color(0xFFB3261E),
 )
 
+private val RedLedgerColorScheme = LedgerColorScheme.copy(
+    primary = Color(0xFFC52232),
+    primaryContainer = Color(0xFFFFE3E6),
+    onPrimaryContainer = Color(0xFF791522),
+    secondary = Color(0xFF78565C),
+    secondaryContainer = Color(0xFFFFE3E6),
+    onSecondaryContainer = Color(0xFF791522),
+    background = Color(0xFFFFF7F7),
+    surfaceVariant = Color(0xFFF7E8EA),
+    outline = Color(0xFFC9ADB2),
+)
+
 @Composable
 private fun ManualLedgerScreen(
     rows: List<ManualTransactionEntity>,
@@ -432,6 +464,8 @@ private fun ManualLedgerScreen(
     onMergeCategories: (String, String) -> Unit,
     onDeleteCategory: (String) -> Unit,
     onChangeTransactionCategory: (String, String) -> Unit,
+    skin: LedgerSkin,
+    onSkinChange: (LedgerSkin) -> Unit,
 ) {
     val context = LocalContext.current
     var categoryMappings by androidx.compose.runtime.remember { mutableStateOf(loadCategoryMappings(context)) }
@@ -568,6 +602,7 @@ private fun ManualLedgerScreen(
             LedgerPage.SETTINGS -> SyncSettingsPage(
                 syncStatus, categoryNodes, rows, onConfigureSync, onDisconnectSync, onSyncNow,
                 onMoveCategory, onMergeCategories, onDeleteCategory,
+                skin, onSkinChange,
             )
             }
         }
@@ -645,12 +680,12 @@ private fun OverviewPage(
     LazyColumn(modifier = Modifier.fillMaxWidth()) {
         item {
             Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B705F)),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary),
                 shape = RoundedCornerShape(26.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(modifier = Modifier.padding(22.dp)) {
-                    Text("${month.monthValue} 月结余", color = Color(0xFFC8EFE4), style = MaterialTheme.typography.labelLarge)
+                    Text("${month.monthValue} 月结余", color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f), style = MaterialTheme.typography.labelLarge)
                     Text(money(balance), color = Color.White, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
                     Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         MetricWithIcon(Icons.Default.ArrowDownward, "收入", money(income), Color(0xFFBFF5D4))
@@ -723,7 +758,7 @@ private fun MetricWithIcon(icon: ImageVector, label: String, value: String, tint
             Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.padding(6.dp).size(18.dp))
         }
         Column(modifier = Modifier.padding(start = 8.dp)) {
-            Text(label, color = Color(0xFFC8EFE4), style = MaterialTheme.typography.bodySmall)
+            Text(label, color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f), style = MaterialTheme.typography.bodySmall)
             Text(value, color = Color.White, fontWeight = FontWeight.SemiBold)
         }
     }
@@ -1459,6 +1494,8 @@ private fun SyncSettingsPage(
     onMoveCategory: (String, String?) -> Unit,
     onMergeCategories: (String, String) -> Unit,
     onDeleteCategory: (String) -> Unit,
+    skin: LedgerSkin,
+    onSkinChange: (LedgerSkin) -> Unit,
 ) {
     var endpoint by androidx.compose.runtime.remember(status.endpoint) { mutableStateOf(status.endpoint) }
     var token by androidx.compose.runtime.remember { mutableStateOf("") }
@@ -1472,6 +1509,36 @@ private fun SyncSettingsPage(
         onDelete = onDeleteCategory,
     )
     LazyColumn(modifier = Modifier.fillMaxWidth()) {
+        item {
+            Text("外观与皮肤", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
+            Card(modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
+                Column(Modifier.padding(14.dp)) {
+                    Text("桌面图标与 App 配色一起切换", style = MaterialTheme.typography.bodyMedium)
+                    Text("已选：${skin.label}", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 4.dp))
+                    LedgerSkin.entries.forEach { option ->
+                        Row(modifier = Modifier.fillMaxWidth().clickable { onSkinChange(option) }.padding(vertical = 10.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Box(Modifier.size(56.dp).clip(RoundedCornerShape(14.dp))
+                                .background(if (option == LedgerSkin.RED) Color(0xFFE32636) else Color(0xFF0B705F))) {
+                                Image(painterResource(if (option == LedgerSkin.RED) R.drawable.ic_launcher_foreground
+                                    else R.drawable.ic_launcher_foreground_green), contentDescription = null,
+                                    modifier = Modifier.fillMaxSize())
+                            }
+                            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                                Text(option.label, fontWeight = FontWeight.SemiBold)
+                                Text(if (option == LedgerSkin.RED) "红色图标 · 温暖红色界面" else "绿色图标 · 清爽绿色界面",
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                            }
+                            RadioButton(selected = skin == option, onClick = { onSkinChange(option) })
+                        }
+                    }
+                    Text("选择会自动保存；桌面图标可能稍后刷新。", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary)
+                }
+            }
+        }
         item {
             Text("安全与同步", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
             Button(onClick = { managingCategories = true }, modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)) {

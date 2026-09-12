@@ -12,8 +12,8 @@ android {
         applicationId = "com.hulk.manualledger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "0.8.0-interactive-analysis-and-editing"
+        versionCode = 21
+        versionName = "0.8.1-selectable-skins"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
