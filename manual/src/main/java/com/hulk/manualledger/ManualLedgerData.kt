@@ -276,6 +276,7 @@ data class NewManualTransaction(
     val occurredAtMs: Long = System.currentTimeMillis(),
     val note: String? = null,
     val preserveCategoryPath: Boolean = false,
+    val categoryId: String? = null,
 )
 
 data class ImportStats(val inserted: Int, val enriched: Int, val unchanged: Int)
@@ -340,6 +341,14 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         return ImportStats(inserted, enriched, unchanged)
     }
 
+    private fun selectedCategoryPath(input: NewManualTransaction): String {
+        val id = input.categoryId ?: return input.category.trim().take(80)
+        val node = db.dao().findCategory(id) ?: error("分类已被删除，请重新选择")
+        require(node.type == input.type) { "分类与收支类型不一致" }
+        require(db.dao().listCategories().none { it.parentId == id }) { "请选择最下级分类" }
+        return CategoryTree.path(id, db.dao().listCategories())
+    }
+
     private fun prepare(input: NewManualTransaction, now: Long): Pair<ManualTransactionEntity, SyncOutboxEntity> {
         val cents = parseCents(input.amountText) ?: error("金额格式错误")
         require(input.category.isNotBlank()) { "分类不能为空" }
@@ -348,8 +357,8 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             id = input.stableId ?: UUID.randomUUID().toString(),
             type = input.type,
             amountCents = cents,
-            category = if (input.preserveCategoryPath || CategoryCatalog.HIERARCHY_SEPARATOR in input.category) input.category.trim().take(80)
-                else CategoryCatalog.normalize(input.type, input.category),
+            category = selectedCategoryPath(input),
+            categoryId = input.categoryId,
             account = input.account.trim().take(40),
             targetAccount = input.targetAccount?.trim()?.take(40)?.ifBlank { null },
             occurredAtMs = input.occurredAtMs,
@@ -449,6 +458,22 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             db.dao().insertCategoryIgnore(created)
         }
         return created
+    }
+
+    fun renameCategory(id: String, name: String): CategoryMutationResult {
+        val clean = name.trim().take(40)
+        require(clean.isNotBlank() && CategoryCatalog.HIERARCHY_SEPARATOR.trim() !in clean) { "分类名称无效" }
+        var result = CategoryMutationResult(0)
+        db.runInTransaction {
+            val dao = db.dao()
+            val node = dao.findCategory(id) ?: error("分类不存在")
+            require(!node.isSystem) { "系统分类不能重命名" }
+            val categories = dao.listCategories()
+            require(categories.none { it.id != id && it.type == node.type && it.parentId == node.parentId && it.name == clean }) { "同级已有同名分类" }
+            dao.updateCategory(node.copy(name = clean, updatedAtMs = System.currentTimeMillis()))
+            result = rewriteCategoryPaths(descendantIds(id, categories))
+        }
+        return result
     }
 
     fun moveCategory(categoryId: String, newParentId: String?): CategoryMutationResult {
@@ -709,14 +734,15 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         val updated = original.copy(
             type = input.type,
             amountCents = cents,
-            category = if (CategoryCatalog.HIERARCHY_SEPARATOR in input.category) input.category.trim().take(80)
-                else CategoryCatalog.normalize(input.type, input.category),
+            category = selectedCategoryPath(input),
             account = input.account.trim().take(40),
             targetAccount = input.targetAccount?.trim()?.take(40)?.ifBlank { null },
             occurredAtMs = input.occurredAtMs,
             note = input.note?.trim()?.take(200)?.ifBlank { null },
             updatedAtMs = now,
-            categoryId = null,
+            categoryId = input.categoryId ?: original.categoryId?.takeIf {
+                original.type == input.type && original.category == input.category.trim()
+            },
         )
         val event = SyncOutboxEntity(
             eventId = UUID.randomUUID().toString(),
@@ -729,7 +755,8 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         )
         var changed = false
         db.runInTransaction {
-            if (db.dao().updateTransaction(updated) > 0) {
+            val current = db.dao().findTransaction(id)
+            if (current?.deletedAtMs == null && current?.updatedAtMs == original.updatedAtMs && db.dao().updateTransaction(updated) > 0) {
                 db.dao().enqueueLatestOutbox(event)
                 changed = true
             }
@@ -763,12 +790,21 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
 object ManualLedgerMigrationCodec {
     const val SCHEMA = "manual-ledger-v1"
 
-    fun exportJson(rows: List<ManualTransactionEntity>): String = buildString {
+    fun exportJson(rows: List<ManualTransactionEntity>, categories: List<LedgerCategoryEntity> = emptyList()): String = buildString {
         append("{\"schema\":\"").append(SCHEMA).append("\",\"exported_at\":\"")
             .append(Instant.now()).append("\",\"transactions\":[")
         rows.forEachIndexed { index, row ->
             if (index > 0) append(',')
             append(transactionJson(row))
+        }
+        append("],\"categories\":[")
+        categories.forEachIndexed { index, node ->
+            if (index > 0) append(',')
+            append("{\"id\":\"").append(json(node.id)).append("\",\"type\":\"").append(node.type.name)
+            append("\",\"name\":\"").append(json(node.name)).append("\",\"parent_id\":")
+            node.parentId?.let { append('"').append(json(it)).append('"') } ?: append("null")
+            append(",\"sort_order\":").append(node.sortOrder).append(",\"is_system\":").append(node.isSystem)
+            append(",\"created_at_ms\":").append(node.createdAtMs).append(",\"updated_at_ms\":").append(node.updatedAtMs).append('}')
         }
         append("]}")
     }

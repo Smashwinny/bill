@@ -49,7 +49,7 @@ class ManualLedgerDatabaseTest {
         assertTrue(repository.update(id, original.copy(amountText = "23.45", category = "交通", note = "已修改")))
         val edited = repository.list().single()
         assertEquals(2345, edited.amountCents)
-        assertEquals("出行 › 未细分", edited.category)
+        assertEquals("交通", edited.category)
         assertEquals("已修改", edited.note)
         assertEquals(1, repository.pendingSyncCount())
 
@@ -140,6 +140,43 @@ class ManualLedgerDatabaseTest {
         database.dao().applyRemoteChanges(listOf(RemoteLedgerChange(row.id, false, row.copy(updatedAtMs = row.updatedAtMs + 2))))
         assertEquals(1, repository.list().size)
         assertTrue(repository.trash().isEmpty())
+    }
+
+    @Test
+    fun noteEditsAndRenamesPreserveCategoryIdentityAndFinancialFields() {
+        repository.import(listOf(NewManualTransaction(stableId = "stable-category", type = ManualTransactionType.EXPENSE,
+            amountText = "15", category = "饮食 › 早餐", account = "现金", preserveCategoryPath = true)))
+        val breakfast = repository.categories().first { it.name == "早餐" }
+        repository.moveCategory(breakfast.id, null)
+        val before = repository.list().single()
+        assertTrue(repository.update(before.id, NewManualTransaction(type = before.type, amountText = "15", category = "早餐",
+            categoryId = breakfast.id, account = before.account, occurredAtMs = before.occurredAtMs, note = "只改备注")))
+        assertEquals("早餐", repository.list().single().category)
+        assertEquals(breakfast.id, repository.list().single().categoryId)
+        repository.renameCategory(breakfast.id, "早饭")
+        val renamed = repository.list().single()
+        assertEquals("早饭", renamed.category)
+        assertEquals(breakfast.id, renamed.categoryId)
+        assertEquals(before.amountCents, renamed.amountCents)
+        assertEquals(before.occurredAtMs, renamed.occurredAtMs)
+        val shopping = repository.categories().first { it.name == "购物" && it.parentId == null }
+        repository.moveCategory(breakfast.id, shopping.id)
+        assertEquals("购物", CategoryTree.rootName(repository.list().single(), repository.categories()))
+        assertEquals("购物 › 早饭", repository.list().single().category)
+        repository.deleteCategory(breakfast.id)
+        assertFalse(CategoryTree.selectable(before.type, repository.categories()).any { it.id == breakfast.id })
+    }
+
+    @Test
+    fun singlePurgeLeavesOtherTrashAndActiveRowsUntouched() {
+        listOf("purge-a", "purge-b", "active").forEach {
+            repository.add(NewManualTransaction(stableId = it, type = ManualTransactionType.EXPENSE, amountText = "8", category = "餐饮", account = "现金"))
+        }
+        repository.delete("purge-a"); repository.delete("purge-b")
+        assertEquals(1, repository.emptyTrash(listOf("purge-a")))
+        assertEquals(listOf("purge-b"), repository.trash().map { it.id })
+        assertEquals(listOf("active"), repository.list().map { it.id })
+        assertEquals(null, database.dao().findTransaction("purge-a"))
     }
 
     @Test

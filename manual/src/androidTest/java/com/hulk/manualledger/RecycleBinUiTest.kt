@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import org.junit.Assert.assertEquals
@@ -64,4 +65,19 @@ class RecycleBinUiTest {
         compose.onNodeWithText("永久删除，无法恢复").performClick()
         compose.runOnIdle { assertEquals(listOf(row.id), purged) }
     }
+    @Test
+    fun singlePurgeConfirmsOnlySelectedRecord() {
+        var purged = emptyList<String>()
+        compose.setContent { MaterialTheme { Column {
+            FlowPage(emptyList(), emptyList(), {}, {}, {}, {}, listOf(row.copy(deletedAtMs = 2), row.copy(id = "other", deletedAtMs = 3)),
+                {}, { purged = it }, { _, _ -> }, { _, _ -> })
+        } } }
+        compose.onNodeWithText("回收站（2）").performClick()
+        compose.onAllNodesWithText("彻底删除这条流水")[0].performClick()
+        compose.onNodeWithText("继续确认").performClick()
+        compose.runOnIdle { assertEquals(emptyList<String>(), purged) }
+        compose.onNodeWithText("永久删除，无法恢复").performClick()
+        compose.runOnIdle { assertEquals(listOf(row.id), purged) }
+    }
+
 }

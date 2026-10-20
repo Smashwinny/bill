@@ -48,7 +48,7 @@ object SuishouCsvParser {
         val incomeIndex = index("收入金额", "收入", "收入(元)", "收入（元）")
         val categoryIndex = index("分类", "类别", "支出分类", "收入分类", "一级分类", "主分类", "项目")
         val subcategoryIndex = index("二级分类", "子分类")
-        val accountIndex = index("账户", "付款账户", "资金账户", "账户1", "转出账户")
+        val accountIndex = index("账户", "付款账户", "资金账户", "支出账户", "账户1", "转出账户")
         val targetAccountIndex = index("账户2", "收款账户", "转入账户")
         val noteIndices = listOf(index("备注", "说明"), index("商家", "交易对象"), index("项目"), index("成员"))
             .filter { it >= 0 }.distinct()

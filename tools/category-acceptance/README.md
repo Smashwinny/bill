@@ -14,15 +14,15 @@ python3 tools/category-acceptance/prepare.py tmp/category-acceptance-new/isolate
 本机已验证的 Gradle 可执行文件为：
 `tmp/gradle-home/wrapper/dists/gradle-8.7-bin/bhs2wmbdwecv87pi65oeuq5iu/gradle-8.7/bin/gradle`，缓存参数使用 `-g /home/hulk/.gradle --offline --no-daemon`。
 
-## 安装并执行已知分类缺陷断言
+## 安装并执行分类回归断言
 
 ```bash
 adb install -r tmp/category-acceptance-new/isolated-source/manual/build/outputs/apk/debug/manual-debug.apk
 adb install -r -t tmp/category-acceptance-new/isolated-source/manual/build/outputs/apk/androidTest/debug/manual-debug-androidTest.apk
-adb shell am instrument -w -e class com.hulk.manualledger.ManualLedgerDatabaseTest,com.hulk.manualledger.ManualLedgerMigrationTest,com.hulk.manualledger.ProductCategoryAcceptanceTest com.hulk.manualledger.acceptance.test/androidx.test.runner.AndroidJUnitRunner
+adb shell am instrument -w -e class com.hulk.manualledger.ManualLedgerDatabaseTest,com.hulk.manualledger.ManualLedgerMigrationTest,com.hulk.manualledger.RecycleBinUiTest,com.hulk.manualledger.CategoryUiTest,com.hulk.manualledger.ProductCategoryAcceptanceTest com.hulk.manualledger.acceptance.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-当前基线结果：`Tests run: 10, Failures: 4`。4 个失败是仍未满足的产品合同，不是预期通过的回归测试；不要修改断言去迎合当前错误行为。该文件独立存放，由 prepare 脚本只加入验收副本，不加入生产默认测试套件。
+2026-09-12 历史基线为 `Tests run: 10, Failures: 4`；历史证据保留在 `docs/CATEGORY_PRODUCT_ACCEPTANCE_20260912.md`。新版选择、统计和导出已统一到数据库分类树，产品断言直接调用与界面相同的 `CategoryTree` 和带分类树的导出 API，不能再用旧的静态别名表替代真实界面行为。最新结果及限制见 `docs/stable-categories-acceptance.md`。
 
 不指定全部测试类：项目另有云同步配置用例，不属于本次离线验收。
 

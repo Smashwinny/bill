@@ -12,8 +12,8 @@ android {
         applicationId = "com.hulk.manualledger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 22
-        versionName = "0.9.0-recycle-bin"
+        versionCode = 23
+        versionName = "0.10.0-stable-categories"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
