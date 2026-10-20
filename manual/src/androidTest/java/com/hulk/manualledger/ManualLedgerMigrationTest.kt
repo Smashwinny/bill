@@ -33,7 +33,7 @@ class ManualLedgerMigrationTest {
             close()
         }
 
-        helper.runMigrationsAndValidate(databaseName, 2, true, MANUAL_LEDGER_MIGRATION_1_2).use { migrated ->
+        helper.runMigrationsAndValidate(databaseName, 3, true, MANUAL_LEDGER_MIGRATION_1_2, MANUAL_LEDGER_MIGRATION_2_3).use { migrated ->
             migrated.query("SELECT id, category, category_id FROM manual_transaction").use { cursor ->
                 cursor.moveToFirst()
                 assertEquals("legacy", cursor.getString(0))
@@ -46,4 +46,22 @@ class ManualLedgerMigrationTest {
             }
         }
     }
+    @Test
+    fun migrationFromTwoKeepsExistingRowsOutOfTrash() {
+        helper.createDatabase("trash-migration", 2).apply {
+            execSQL("""INSERT INTO manual_transaction
+                (id,type,amount_cents,currency,category,account,target_account,occurred_at_ms,note,created_at_ms,updated_at_ms,category_id)
+                VALUES ('existing','EXPENSE',1234,'CNY','餐饮','现金',NULL,1,'原始备注',1,1,NULL)""")
+            close()
+        }
+        helper.runMigrationsAndValidate("trash-migration", 3, true, MANUAL_LEDGER_MIGRATION_2_3).use { db ->
+            db.query("SELECT amount_cents, note, deleted_at_ms FROM manual_transaction WHERE id = 'existing'").use {
+                it.moveToFirst()
+                assertEquals(1234, it.getInt(0))
+                assertEquals("原始备注", it.getString(1))
+                assertEquals(true, it.isNull(2))
+            }
+        }
+    }
+
 }

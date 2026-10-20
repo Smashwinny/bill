@@ -59,6 +59,90 @@ class ManualLedgerDatabaseTest {
     }
 
     @Test
+    fun trashRestorePurgeAndCloudReplayPreserveUserIntent() {
+        val input = NewManualTransaction(
+            stableId = "trash-test", type = ManualTransactionType.EXPENSE,
+            amountText = "12.34", category = "餐饮", account = "现金", note = "完整保留",
+        )
+        repository.add(input)
+        val original = repository.list().single()
+        repository.delete(original.id)
+        assertTrue(repository.list().isEmpty())
+        assertEquals(original.copy(deletedAtMs = repository.trash().single().deletedAtMs,
+            updatedAtMs = repository.trash().single().updatedAtMs), repository.trash().single())
+        assertEquals(1, repository.import(listOf(input.copy(note = "不应覆盖"))).unchanged)
+        assertFalse(repository.update(original.id, input))
+        assertTrue(repository.restore(original.id))
+        val restored = repository.list().single()
+        assertEquals(original.amountCents, restored.amountCents)
+        assertEquals(original.note, restored.note)
+        assertEquals(original.createdAtMs, restored.createdAtMs)
+        assertTrue(repository.trash().isEmpty())
+        // A confirmation snapshot must never delete a row restored meanwhile.
+        assertEquals(0, repository.emptyTrash(listOf(original.id)))
+        database.dao().markSynced(database.dao().pendingOutbox(Long.MAX_VALUE).map { it.eventId })
+        database.dao().applyRemoteChanges(listOf(
+            RemoteLedgerChange(original.id, true, null, restored.updatedAtMs - 1),
+            RemoteLedgerChange(original.id, false, original),
+        ))
+        assertEquals(restored, repository.list().single())
+        repository.delete(original.id)
+        assertEquals(1, repository.emptyTrash(listOf(original.id)))
+        assertTrue(repository.trash().isEmpty())
+        assertEquals(null, database.dao().findTransaction(original.id))
+        assertEquals(1, repository.pendingSyncCount())
+        database.dao().markSynced(database.dao().pendingOutbox(Long.MAX_VALUE).map { it.eventId })
+        database.dao().applyRemoteChanges(listOf(RemoteLedgerChange(original.id, false, restored)))
+        assertTrue(repository.list().isEmpty())
+        assertFalse(repository.restore(original.id))
+    }
+
+    @Test
+    fun trashAndPurgeSurviveDatabaseReopen() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val name = "recycle-bin-${java.util.UUID.randomUUID()}.db"
+        fun open() = Room.databaseBuilder(context, ManualLedgerDatabase::class.java, name).allowMainThreadQueries().build()
+        var disk = open()
+        try {
+            var repo = ManualLedgerRepository(disk)
+            repo.add(NewManualTransaction(stableId = "durable", type = ManualTransactionType.EXPENSE,
+                amountText = "8", category = "餐饮", account = "现金"))
+            repo.delete("durable")
+            disk.close()
+            disk = open()
+            repo = ManualLedgerRepository(disk)
+            assertTrue(repo.list().isEmpty())
+            assertEquals("durable", repo.trash().single().id)
+            assertTrue(repo.restore("durable"))
+            repo.delete("durable")
+            assertEquals(1, repo.emptyTrash(listOf("durable")))
+            disk.close()
+            disk = open()
+            repo = ManualLedgerRepository(disk)
+            assertTrue(repo.list().isEmpty())
+            assertTrue(repo.trash().isEmpty())
+            assertEquals(1, disk.dao().isPurged("durable"))
+        } finally {
+            disk.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test
+    fun remoteDeleteMovesExistingRecordToTrashAndNewerRestoreReactivatesIt() {
+        repository.add(NewManualTransaction(stableId = "remote-trash", type = ManualTransactionType.INCOME,
+            amountText = "100", category = "工资", account = "银行卡"))
+        val row = repository.list().single()
+        database.dao().markSynced(database.dao().pendingOutbox(Long.MAX_VALUE).map { it.eventId })
+        database.dao().applyRemoteChanges(listOf(RemoteLedgerChange(row.id, true, null, row.updatedAtMs + 1)))
+        assertTrue(repository.list().isEmpty())
+        assertEquals(row.note, repository.trash().single().note)
+        database.dao().applyRemoteChanges(listOf(RemoteLedgerChange(row.id, false, row.copy(updatedAtMs = row.updatedAtMs + 2))))
+        assertEquals(1, repository.list().size)
+        assertTrue(repository.trash().isEmpty())
+    }
+
+    @Test
     fun reimportEnrichesExistingHierarchyWithoutCreatingDuplicateTransaction() {
         val base = NewManualTransaction(
             stableId = "suishou-stable-id",

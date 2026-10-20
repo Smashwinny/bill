@@ -106,6 +106,7 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     private val executor = Executors.newSingleThreadExecutor()
     private lateinit var repository: ManualLedgerRepository
+    private var trashRows by mutableStateOf<List<ManualTransactionEntity>>(emptyList())
     private var rows by mutableStateOf<List<ManualTransactionEntity>>(emptyList())
     private var categoryNodes by mutableStateOf<List<LedgerCategoryEntity>>(emptyList())
     private var pendingCount by mutableStateOf(0L)
@@ -160,6 +161,9 @@ class MainActivity : ComponentActivity() {
                         onExport = ::export,
                         onDirectMigration = ::migrateToAutomaticLedger,
                         onDelete = ::delete,
+                        trashRows = trashRows,
+                        onRestore = ::restore,
+                        onEmptyTrash = ::emptyTrash,
                         onEdit = ::edit,
                         pendingImport = pendingImport,
                         onConfirmImport = ::confirmImport,
@@ -292,8 +296,27 @@ class MainActivity : ComponentActivity() {
     private fun delete(id: String) {
         executor.execute {
             runCatching { repository.delete(id) }
-                .onSuccess { ManualSyncScheduler.syncNow(this); refresh("已删除；变更会在联网后同步") }
+                .onSuccess { ManualSyncScheduler.syncNow(this); refresh("已移入回收站，可随时恢复；变更会在联网后同步") }
                 .onFailure { runOnUiThread { message = "删除失败：${it.message}" } }
+        }
+    }
+
+    private fun restore(id: String) {
+        executor.execute {
+            runCatching { repository.restore(id) }
+                .onSuccess { restored ->
+                    if (restored) ManualSyncScheduler.syncNow(this)
+                    refresh(if (restored) "流水已恢复" else "流水已不在回收站")
+                }
+                .onFailure { runOnUiThread { message = "恢复失败：${it.message}" } }
+        }
+    }
+
+    private fun emptyTrash(ids: List<String>) {
+        executor.execute {
+            runCatching { repository.emptyTrash(ids) }
+                .onSuccess { count -> refresh("已永久删除 $count 条回收站流水") }
+                .onFailure { runOnUiThread { message = "清空失败：${it.message}" } }
         }
     }
 
@@ -398,11 +421,13 @@ class MainActivity : ComponentActivity() {
 
     private fun refresh(after: String? = null) {
         val latest = repository.list()
+        val latestTrash = repository.trash()
         val latestCategories = repository.categories()
         val pending = repository.pendingSyncCount()
         val latestSync = ManualSyncSettings.status(this)
         runOnUiThread {
             rows = latest
+            trashRows = latestTrash
             categoryNodes = latestCategories
             pendingCount = pending
             syncStatus = latestSync
@@ -450,6 +475,9 @@ private fun ManualLedgerScreen(
     onExport: () -> Unit,
     onDirectMigration: () -> Unit,
     onDelete: (String) -> Unit,
+    trashRows: List<ManualTransactionEntity>,
+    onRestore: (String) -> Unit,
+    onEmptyTrash: (List<String>) -> Unit,
     onEdit: (String, NewManualTransaction) -> Unit,
     pendingImport: SuishouImportResult?,
     onConfirmImport: () -> Unit,
@@ -582,7 +610,8 @@ private fun ManualLedgerScreen(
                 },
             )
             LedgerPage.FLOW -> FlowPage(
-                rows, categoryNodes, onImport, onExport, onDirectMigration, onDelete, onEdit,
+                rows, categoryNodes, onImport, onExport, onDirectMigration, onDelete,
+                trashRows, onRestore, onEmptyTrash, onEdit,
                 onChangeTransactionCategory,
             )
             LedgerPage.ANALYSIS -> AnalysisPage(
@@ -867,16 +896,64 @@ private fun RecordPage(
 }
 
 @Composable
-private fun FlowPage(
+internal fun FlowPage(
     rows: List<ManualTransactionEntity>,
     categoryNodes: List<LedgerCategoryEntity>,
     onImport: () -> Unit,
     onExport: () -> Unit,
     onDirectMigration: () -> Unit,
     onDelete: (String) -> Unit,
+    trashRows: List<ManualTransactionEntity>,
+    onRestore: (String) -> Unit,
+    onEmptyTrash: (List<String>) -> Unit,
     onEdit: (String, NewManualTransaction) -> Unit,
     onChangeTransactionCategory: (String, String) -> Unit,
 ) {
+    var showingTrash by remember { mutableStateOf(false) }
+    var pendingDelete by remember { mutableStateOf<ManualTransactionEntity?>(null) }
+    var pendingPurge by remember { mutableStateOf<List<String>?>(null) }
+    pendingDelete?.let { row ->
+        TwoStepDeleteDialog(
+            title = "移入回收站？",
+            detail = "${row.category} · ${money(row.amountCents)}\n${row.account} · ${formatTime(row.occurredAtMs)}\n移入后不再计入统计，可在回收站恢复。",
+            finalTitle = "再次确认移入回收站",
+            finalAction = "确认移入回收站",
+            onDismiss = { pendingDelete = null },
+            onConfirm = { onDelete(row.id); pendingDelete = null },
+        )
+    }
+    pendingPurge?.let { ids ->
+        TwoStepDeleteDialog(
+            title = "清空回收站？",
+            detail = "将永久删除这 ${ids.size} 条流水，无法恢复。回收站不会自动清空。",
+            finalTitle = "最后确认：永久删除 ${ids.size} 条流水",
+            finalAction = "永久删除，无法恢复",
+            onDismiss = { pendingPurge = null },
+            onConfirm = { onEmptyTrash(ids); pendingPurge = null },
+        )
+    }
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        TextButton(onClick = { showingTrash = !showingTrash }) {
+            Text(if (showingTrash) "返回全部流水" else "回收站（${trashRows.size}）")
+        }
+        if (showingTrash && trashRows.isNotEmpty()) TextButton(onClick = { pendingPurge = trashRows.map { it.id } }) {
+            Text("清空回收站", color = MaterialTheme.colorScheme.error)
+        }
+    }
+    if (showingTrash) {
+        Text("回收站", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text("流水会一直保留，恢复后重新计入统计；仅清空回收站才会永久删除。", style = MaterialTheme.typography.bodySmall)
+        if (trashRows.isEmpty()) EmptyHint("回收站是空的")
+        else LazyColumn(modifier = Modifier.fillMaxWidth()) {
+            items(trashRows, key = { it.id }) { row ->
+                Column {
+                    TransactionRow(row)
+                    TextButton(onClick = { onRestore(row.id) }) { Text("恢复这条流水") }
+                }
+            }
+        }
+        return
+    }
     var query by androidx.compose.runtime.remember { mutableStateOf("") }
     var editing by androidx.compose.runtime.remember { mutableStateOf<ManualTransactionEntity?>(null) }
     var changingCategory by androidx.compose.runtime.remember { mutableStateOf<ManualTransactionEntity?>(null) }
@@ -926,10 +1003,33 @@ private fun FlowPage(
                 row,
                 onEdit = { editing = row },
                 onChangeCategory = { changingCategory = row },
-                onDelete = { onDelete(row.id) },
+                onDelete = { pendingDelete = row },
             )
         }
     }
+}
+
+@Composable
+private fun TwoStepDeleteDialog(
+    title: String,
+    detail: String,
+    finalTitle: String,
+    finalAction: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    var finalStep by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (finalStep) finalTitle else title) },
+        text = { Text(detail) },
+        confirmButton = {
+            TextButton(onClick = { if (finalStep) onConfirm() else finalStep = true }) {
+                Text(if (finalStep) finalAction else "继续确认", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 @Composable

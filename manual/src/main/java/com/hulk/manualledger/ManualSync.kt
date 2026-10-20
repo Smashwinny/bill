@@ -46,6 +46,7 @@ data class RemoteLedgerChange(
     val transactionId: String,
     val deleted: Boolean,
     val transaction: ManualTransactionEntity?,
+    val updatedAtMs: Long = transaction?.updatedAtMs ?: 0L,
 )
 
 object ManualSyncSettings {
@@ -121,7 +122,7 @@ class ManualSyncWorker(context: Context, params: WorkerParameters) : CoroutineWo
     override suspend fun doWork(): Result {
         val token = ManualSyncSettings.token(applicationContext) ?: return Result.success()
         val database = Room.databaseBuilder(applicationContext, ManualLedgerDatabase::class.java, "manual-ledger.db")
-            .addMigrations(MANUAL_LEDGER_MIGRATION_1_2).build()
+            .addMigrations(MANUAL_LEDGER_MIGRATION_1_2, MANUAL_LEDGER_MIGRATION_2_3).build()
         val dao = database.dao()
         var cursor = ManualSyncSettings.cursor(applicationContext)
         return try {
@@ -181,7 +182,7 @@ class ManualSyncWorker(context: Context, params: WorkerParameters) : CoroutineWo
 
     private fun parseRemote(payload: JSONObject): RemoteLedgerChange {
         val id = payload.getString("id")
-        if (payload.optBoolean("deleted", false)) return RemoteLedgerChange(id, true, null)
+        if (payload.optBoolean("deleted", false)) return RemoteLedgerChange(id, true, null, payload.getLong("updated_at_ms"))
         val updated = payload.getLong("updated_at_ms")
         val entity = ManualTransactionEntity(
             id = id,

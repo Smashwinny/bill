@@ -96,7 +96,13 @@ data class ManualTransactionEntity(
     @ColumnInfo(name = "created_at_ms") val createdAtMs: Long,
     @ColumnInfo(name = "updated_at_ms") val updatedAtMs: Long,
     @ColumnInfo(name = "category_id") val categoryId: String? = null,
+    @ColumnInfo(name = "deleted_at_ms") val deletedAtMs: Long? = null,
 )
+
+// Retain only the identity after a purge so replaying cloud history cannot
+// resurrect permanently deleted records. No transaction content is retained.
+@Entity(tableName = "purged_transaction")
+data class PurgedTransactionEntity(@PrimaryKey val id: String)
 
 @Entity(
     tableName = "ledger_category",
@@ -141,7 +147,7 @@ abstract class ManualLedgerDao {
         insertOutbox(entity)
     }
 
-    @Query("SELECT * FROM manual_transaction ORDER BY occurred_at_ms DESC, created_at_ms DESC")
+    @Query("SELECT * FROM manual_transaction WHERE deleted_at_ms IS NULL ORDER BY occurred_at_ms DESC, created_at_ms DESC")
     abstract fun listTransactions(): List<ManualTransactionEntity>
 
     @Query("SELECT * FROM sync_outbox WHERE state = 'PENDING' AND next_attempt_at_ms <= :nowMs ORDER BY created_at_ms LIMIT :limit")
@@ -156,8 +162,26 @@ abstract class ManualLedgerDao {
     @Query("SELECT COUNT(*) FROM sync_outbox WHERE state = 'PENDING'")
     abstract fun pendingCount(): Long
 
-    @Query("DELETE FROM manual_transaction WHERE id = :id")
-    abstract fun deleteTransaction(id: String): Int
+    @Query("SELECT * FROM manual_transaction WHERE deleted_at_ms IS NOT NULL ORDER BY deleted_at_ms DESC")
+    abstract fun listTrash(): List<ManualTransactionEntity>
+
+    @Query("UPDATE manual_transaction SET deleted_at_ms = :now, updated_at_ms = :now WHERE id = :id AND deleted_at_ms IS NULL")
+    abstract fun moveToTrash(id: String, now: Long): Int
+
+    @Query("DELETE FROM manual_transaction WHERE id IN (:ids) AND deleted_at_ms IS NOT NULL")
+    abstract fun purgeTrash(ids: List<String>): Int
+
+    @Query("SELECT COUNT(*) FROM sync_outbox WHERE transaction_id = :id AND state = 'PENDING'")
+    abstract fun pendingForTransaction(id: String): Int
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    abstract fun insertPurged(entity: PurgedTransactionEntity)
+
+    @Query("DELETE FROM sync_outbox WHERE transaction_id = :id AND state = 'SYNCED'")
+    abstract fun deleteSyncedHistory(id: String): Int
+
+    @Query("SELECT COUNT(*) FROM purged_transaction WHERE id = :id")
+    abstract fun isPurged(id: String): Int
 
     @Query("SELECT * FROM manual_transaction WHERE id = :id LIMIT 1")
     abstract fun findTransaction(id: String): ManualTransactionEntity?
@@ -168,7 +192,7 @@ abstract class ManualLedgerDao {
     @Query("UPDATE manual_transaction SET category_id = :categoryId WHERE id = :transactionId")
     abstract fun bindTransactionCategory(transactionId: String, categoryId: String): Int
 
-    @Query("SELECT * FROM manual_transaction WHERE category_id IN (:categoryIds)")
+    @Query("SELECT * FROM manual_transaction WHERE deleted_at_ms IS NULL AND category_id IN (:categoryIds)")
     abstract fun transactionsInCategories(categoryIds: List<String>): List<ManualTransactionEntity>
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
@@ -192,7 +216,10 @@ abstract class ManualLedgerDao {
     @Transaction
     open fun applyRemoteChanges(changes: List<RemoteLedgerChange>) {
         changes.forEach { change ->
-            if (change.deleted) deleteTransaction(change.transactionId)
+            if (isPurged(change.transactionId) > 0 || pendingForTransaction(change.transactionId) > 0) return@forEach
+            val existing = findTransaction(change.transactionId)
+            if (existing != null && change.updatedAtMs <= existing.updatedAtMs) return@forEach
+            if (change.deleted) moveToTrash(change.transactionId, change.updatedAtMs)
             else change.transaction?.let { remote ->
                 val local = findTransaction(remote.id)
                 upsertRemoteTransaction(remote.copy(
@@ -204,8 +231,8 @@ abstract class ManualLedgerDao {
 }
 
 @Database(
-    entities = [ManualTransactionEntity::class, SyncOutboxEntity::class, LedgerCategoryEntity::class],
-    version = 2,
+    entities = [ManualTransactionEntity::class, SyncOutboxEntity::class, LedgerCategoryEntity::class, PurgedTransactionEntity::class],
+    version = 3,
     exportSchema = true,
 )
 abstract class ManualLedgerDatabase : RoomDatabase() {
@@ -232,6 +259,13 @@ val MANUAL_LEDGER_MIGRATION_1_2 = object : Migration(1, 2) {
     }
 }
 
+val MANUAL_LEDGER_MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE manual_transaction ADD COLUMN deleted_at_ms INTEGER")
+        db.execSQL("CREATE TABLE IF NOT EXISTS purged_transaction (id TEXT NOT NULL PRIMARY KEY)")
+    }
+}
+
 data class NewManualTransaction(
     val stableId: String? = null,
     val type: ManualTransactionType,
@@ -253,7 +287,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         val (tx, event) = prepare(input, System.currentTimeMillis())
         var inserted = false
         db.runInTransaction {
-            if (db.dao().insertTransactionIgnore(tx) != -1L) {
+            if (db.dao().isPurged(tx.id) == 0 && db.dao().insertTransactionIgnore(tx) != -1L) {
                 db.dao().enqueueLatestOutbox(event)
                 inserted = true
             }
@@ -270,11 +304,13 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
         db.runInTransaction {
             rows.forEachIndexed { index, input ->
                 val (tx, event) = prepare(input, base + index)
+                if (db.dao().isPurged(tx.id) > 0) { unchanged++; return@forEachIndexed }
                 if (db.dao().insertTransactionIgnore(tx) != -1L) {
                     db.dao().enqueueLatestOutbox(event)
                     inserted++
                 } else {
                     val original = db.dao().findTransaction(tx.id)
+                    if (original?.deletedAtMs != null) { unchanged++; return@forEachIndexed }
                     val changed = original != null && (
                         original.type != tx.type || original.amountCents != tx.amountCents ||
                             original.category != tx.category || original.account != tx.account ||
@@ -490,7 +526,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             val categories = dao.listCategories()
             val target = categories.firstOrNull { it.id == categoryId } ?: error("分类不存在")
             require(categories.none { it.parentId == target.id }) { "账单只能绑定到最下级分类" }
-            val row = dao.findTransaction(transactionId) ?: return@runInTransaction
+            val row = dao.findTransaction(transactionId)?.takeIf { it.deletedAtMs == null } ?: return@runInTransaction
             if (row.categoryId != target.id) {
                 enqueueCategoryChange(row, target, System.currentTimeMillis())
                 changed = true
@@ -613,8 +649,10 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
     private fun categorySegments(path: String): List<String> = path.split(CategoryCatalog.HIERARCHY_SEPARATOR)
         .map(String::trim).filter(String::isNotBlank).ifEmpty { listOf(UNCATEGORIZED_NAME) }
 
+    fun trash(): List<ManualTransactionEntity> = db.dao().listTrash()
+
     fun delete(id: String) {
-        val now = System.currentTimeMillis()
+        val now = maxOf(System.currentTimeMillis(), (db.dao().findTransaction(id)?.updatedAtMs ?: 0) + 1)
         val event = SyncOutboxEntity(
             eventId = UUID.randomUUID().toString(),
             transactionId = id,
@@ -625,15 +663,48 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
             createdAtMs = now,
         )
         db.runInTransaction {
-            if (db.dao().deleteTransaction(id) > 0) db.dao().enqueueLatestOutbox(event)
+            if (db.dao().moveToTrash(id, now) > 0) db.dao().enqueueLatestOutbox(event)
         }
+    }
+
+    fun restore(id: String): Boolean {
+        var restored = false
+        db.runInTransaction {
+            val original = db.dao().findTransaction(id) ?: return@runInTransaction
+            if (original.deletedAtMs == null) return@runInTransaction
+            val now = maxOf(System.currentTimeMillis(), original.updatedAtMs + 1)
+            val row = original.copy(deletedAtMs = null, updatedAtMs = now)
+            db.dao().updateTransaction(row)
+            db.dao().enqueueLatestOutbox(SyncOutboxEntity(
+                UUID.randomUUID().toString(), id, ManualLedgerMigrationCodec.transactionJson(row),
+                OutboxState.PENDING, 0, now, now,
+            ))
+            restored = true
+        }
+        if (restored) ensureCategoryTree()
+        return restored
+    }
+
+    // Only the records shown in the confirmation may be purged. Keep pending
+    // cloud tombstones so an offline purge cannot cancel deletion sync.
+    fun emptyTrash(ids: List<String>): Int {
+        var removed = 0
+        db.runInTransaction {
+            val targets = ids.filter { db.dao().findTransaction(it)?.deletedAtMs != null }
+            targets.forEach {
+                db.dao().insertPurged(PurgedTransactionEntity(it))
+                db.dao().deleteSyncedHistory(it)
+            }
+            removed = targets.chunked(900).sumOf { db.dao().purgeTrash(it) }
+        }
+        return removed
     }
 
     fun update(id: String, input: NewManualTransaction): Boolean {
         val cents = parseCents(input.amountText) ?: error("金额格式错误")
         require(input.category.isNotBlank()) { "分类不能为空" }
         require(input.account.isNotBlank()) { "账户不能为空" }
-        val original = db.dao().findTransaction(id) ?: return false
+        val original = db.dao().findTransaction(id)?.takeIf { it.deletedAtMs == null } ?: return false
         val now = System.currentTimeMillis()
         val updated = original.copy(
             type = input.type,
@@ -676,7 +747,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
                 context.applicationContext,
                 ManualLedgerDatabase::class.java,
                 "manual-ledger.db",
-            ).addMigrations(MANUAL_LEDGER_MIGRATION_1_2).build()
+            ).addMigrations(MANUAL_LEDGER_MIGRATION_1_2, MANUAL_LEDGER_MIGRATION_2_3).build()
             return ManualLedgerRepository(db)
         }
 
