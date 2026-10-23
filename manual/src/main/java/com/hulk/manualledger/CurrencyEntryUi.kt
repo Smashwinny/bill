@@ -6,6 +6,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -64,8 +65,12 @@ internal fun AmountField(value: String, onValue: (String) -> Unit,
         TextButton(onClick = { choosingCurrency = true }, modifier = Modifier.testTag("choose-currency")) {
             Text("${entry.currency} · ${LedgerCurrencies.names[entry.currency]} ▾")
         }
-        OutlinedTextField(value, { onValue(it.take(120)) }, label = { Text("金额") }, placeholder = { Text("0.00") },
-            singleLine = true, textStyle = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+        TextField(value, { onValue(it.take(120)) }, label = { Text("金额") }, placeholder = { Text("0.00") },
+            singleLine = true, textStyle = MaterialTheme.typography.headlineLarge,
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
+                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
+                focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent),
             isError = value.isNotBlank() && booked == null && !entry.loading,
             supportingText = if (value.isBlank()) null else ({
                 Text(booked?.let { if (it.originalCurrency == "CNY") "= ¥${AmountExpression.format(it.cnyCents)}"

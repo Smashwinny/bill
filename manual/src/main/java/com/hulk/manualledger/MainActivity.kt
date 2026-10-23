@@ -71,7 +71,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material.icons.outlined.*
+import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -145,7 +148,7 @@ class MainActivity : ComponentActivity() {
         monthlyBudgetCents = getSharedPreferences("manual_settings", MODE_PRIVATE)
             .getLong("monthly_budget_cents", 0L)
         setContent {
-            MaterialTheme(colorScheme = if (skin == LedgerSkin.RED) RedLedgerColorScheme else LedgerColorScheme) {
+            LedgerTheme(skin) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     ManualLedgerScreen(
                         rows = rows,
@@ -453,34 +456,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private val LedgerColorScheme = lightColorScheme(
-    primary = Color(0xFF0B705F),
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFD7F4E8),
-    onPrimaryContainer = Color(0xFF06463C),
-    secondary = Color(0xFF4D635D),
-    secondaryContainer = Color(0xFFD7F4E8),
-    onSecondaryContainer = Color(0xFF06463C),
-    tertiary = Color(0xFFE59B24),
-    background = Color(0xFFF4F8F5),
-    surface = Color(0xFFFFFFFF),
-    surfaceVariant = Color(0xFFE7F0EC),
-    outline = Color(0xFFBBC9C3),
-    error = Color(0xFFB3261E),
-)
-
-private val RedLedgerColorScheme = LedgerColorScheme.copy(
-    primary = Color(0xFFC52232),
-    primaryContainer = Color(0xFFFFE3E6),
-    onPrimaryContainer = Color(0xFF791522),
-    secondary = Color(0xFF78565C),
-    secondaryContainer = Color(0xFFFFE3E6),
-    onSecondaryContainer = Color(0xFF791522),
-    background = Color(0xFFFFF7F7),
-    surfaceVariant = Color(0xFFF7E8EA),
-    outline = Color(0xFFC9ADB2),
-)
-
 @Composable
 internal fun ManualLedgerScreen(
     rows: List<ManualTransactionEntity>,
@@ -574,15 +549,21 @@ internal fun ManualLedgerScreen(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.navigationBars,
         bottomBar = {
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+            Surface(shadowElevation = 8.dp, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                color = MaterialTheme.colorScheme.surface) {
+            NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
                 LedgerPage.entries.forEach { option ->
                     NavigationBarItem(
                         selected = page == option,
                         onClick = { page = option },
-                        icon = { Icon(option.icon, contentDescription = option.title) },
+                        icon = { Icon(option.icon, contentDescription = option.title, modifier = Modifier.size(23.dp)) },
+                        colors = NavigationBarItemDefaults.colors(indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedIconColor = MaterialTheme.colorScheme.primary, selectedTextColor = MaterialTheme.colorScheme.primary,
+                            unselectedIconColor = MaterialTheme.colorScheme.secondary, unselectedTextColor = MaterialTheme.colorScheme.secondary),
                         label = { Text(option.title) },
                     )
                 }
+            }
             }
         },
     ) { scaffoldPadding ->
@@ -679,19 +660,19 @@ internal fun ManualLedgerScreen(
 }
 
 private enum class LedgerPage(val title: String, val icon: ImageVector) {
-    OVERVIEW("首页", Icons.Default.Home),
-    FLOW("流水", Icons.AutoMirrored.Filled.ReceiptLong),
+    OVERVIEW("首页", Icons.Outlined.Home),
+    FLOW("流水", Icons.AutoMirrored.Outlined.ReceiptLong),
     RECORD("记一笔", Icons.Default.AddCircle),
-    ANALYSIS("分析", Icons.Default.Analytics),
-    SETTINGS("设置", Icons.Default.Settings),
+    ANALYSIS("分析", Icons.Outlined.Analytics),
+    SETTINGS("设置", Icons.Outlined.Settings),
 }
 
 @Composable
 private fun LedgerHeader(pendingCount: Long, cloudConfigured: Boolean, message: String) {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Column {
+        Column(Modifier.weight(1f).padding(end = 10.dp)) {
             Text("本地账本", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text("每一笔，都稳稳留在自己手里", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+            Text("让每一笔生活，清晰有序", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
         }
         Surface(
             color = if (!cloudConfigured || pendingCount == 0L) MaterialTheme.colorScheme.primaryContainer else Color(0xFFFFEBC8),
@@ -712,7 +693,8 @@ private fun LedgerHeader(pendingCount: Long, cloudConfigured: Boolean, message: 
             }
         }
     }
-    Text(message, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 5.dp, bottom = 8.dp))
+    if (message.isNotBlank()) Text(message, color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.labelSmall,
+        modifier = Modifier.padding(top = 6.dp, bottom = 8.dp))
 }
 
 @Composable
@@ -743,11 +725,9 @@ private fun OverviewPage(
             },
         )
     }
-    val grouped = rows.asSequence().filter { it.type == ManualTransactionType.EXPENSE }
-        .groupBy(resolveCategory).mapValues { (_, value) -> value.sumOf { it.amountCents } }
-        .entries.sortedByDescending { it.value }
+    val frequency = remember(month, rows, categoryNodes) { LedgerBrowsing.expenseFrequency(rows, month, resolveCategory) }
     val balance = income - expense
-    LazyColumn(modifier = Modifier.fillMaxWidth()) {
+    LazyColumn(modifier = Modifier.fillMaxWidth().testTag("overview-list")) {
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary),
@@ -755,17 +735,23 @@ private fun OverviewPage(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(modifier = Modifier.fillMaxWidth().background(
-                    androidx.compose.ui.graphics.Brush.linearGradient(listOf(Color(0xFF202C46), Color(0xFF465777))))
+                    androidx.compose.ui.graphics.Brush.linearGradient(listOf(
+                        androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.primary, Color(0xFF111C18), .64f),
+                        androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.primary, Color(0xFF111C18), .28f))))
                     .padding(22.dp)) {
-                    Text("${month.monthValue} 月结余", color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f), style = MaterialTheme.typography.labelLarge)
-                    Text(money(balance), color = Color.White, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("${month.monthValue} 月结余", color = Color.White.copy(alpha = .78f), style = MaterialTheme.typography.labelLarge)
+                        Text("人民币 · CNY", color = Color.White.copy(alpha = .65f), style = MaterialTheme.typography.labelSmall)
+                    }
+                    Text(money(balance), modifier = Modifier.padding(top = 8.dp), color = Color.White, style = MaterialTheme.typography.headlineLarge)
+                    androidx.compose.material3.HorizontalDivider(Modifier.padding(top = 18.dp), color = Color.White.copy(alpha = .14f))
                     Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         MetricWithIcon(Icons.Default.ArrowDownward, "收入", money(income), Color(0xFFBFF5D4))
                         MetricWithIcon(Icons.Default.ArrowUpward, "支出", money(expense), Color(0xFFFFD59C))
                     }
                 }
             }
-            Button(onClick = onAdd, modifier = Modifier.fillMaxWidth().padding(top = 12.dp), shape = RoundedCornerShape(16.dp)) {
+            Button(onClick = onAdd, modifier = Modifier.fillMaxWidth().padding(top = 12.dp).heightIn(min = 50.dp), shape = RoundedCornerShape(16.dp)) {
                 Icon(Icons.Default.AddCircle, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text("记一笔", fontWeight = FontWeight.Bold)
@@ -801,17 +787,7 @@ private fun OverviewPage(
                 }
             }
         }
-        item {
-            Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("支出去向", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                TextButton(onClick = onAnalysis) { Text("看分析") }
-            }
-            if (grouped.isEmpty()) EmptyHint("记下第一笔后，这里会自动长出消费结构")
-        }
-        items(grouped.take(3), key = { it.key }) { item ->
-            val ratio = if (expense == 0L) 0f else item.value.toFloat() / expense
-            CategoryProgress(item.key, item.value, ratio)
-        }
+        item { CategoryFrequencyCard(frequency, onAnalysis) }
         item {
             Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("最近流水", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -835,29 +811,6 @@ private fun MetricWithIcon(icon: ImageVector, label: String, value: String, tint
         Column(modifier = Modifier.padding(start = 8.dp)) {
             Text(label, color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f), style = MaterialTheme.typography.bodySmall)
             Text(value, color = Color.White, fontWeight = FontWeight.SemiBold)
-        }
-    }
-}
-
-@Composable
-private fun CategoryProgress(name: String, amount: Long, ratio: Float) {
-    Card(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(18.dp),
-    ) {
-        Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Surface(shape = CircleShape, color = categoryColor(name).copy(alpha = 0.16f)) {
-                Text(name.take(1), modifier = Modifier.padding(10.dp), color = categoryColor(name), fontWeight = FontWeight.Bold)
-            }
-            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(name, fontWeight = FontWeight.Medium)
-                    Text(money(amount), fontWeight = FontWeight.SemiBold)
-                }
-                LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth().padding(top = 7.dp), color = categoryColor(name))
-            }
-            Text("${(ratio * 100).toInt()}%", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
         }
     }
 }
@@ -912,7 +865,6 @@ internal fun RecordPage(
                 shape = RoundedCornerShape(22.dp),
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text("金额", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
                     AmountField(amount, onAmount, currencyEntry, onCurrency)
                     Text("消费分类", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 14.dp))
                     TextButton(onClick = { choosingCategory = true }) {
@@ -933,7 +885,7 @@ internal fun RecordPage(
             Button(
                 onClick = onSave,
                 enabled = currencyEntry.result.isSuccess && category.isNotBlank() && account.isNotBlank(),
-                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 16.dp).heightIn(min = 52.dp),
                 shape = RoundedCornerShape(16.dp),
             ) { Text("保存到本机", fontWeight = FontWeight.Bold) }
             Text("离线也能保存，网络恢复后自动同步", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.fillMaxWidth().padding(8.dp), textAlign = TextAlign.Center)
@@ -1120,11 +1072,10 @@ private fun TransactionRow(
             .then(if (onEdit != null) Modifier.clickable(onClick = onEdit) else Modifier),
         colors = CardDefaults.cardColors(containerColor = if (highlighted) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(.5.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Row(modifier = Modifier.padding(14.dp).fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Surface(shape = CircleShape, color = categoryColor(row.category).copy(alpha = 0.16f)) {
-                Text(row.category.take(1), modifier = Modifier.padding(10.dp), color = categoryColor(row.category), fontWeight = FontWeight.Bold)
-            }
+            CategoryBadge(row.category)
             Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Text(row.category, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text("${row.account} · ${formatTime(row.occurredAtMs)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
@@ -1858,10 +1809,11 @@ private fun CategoryPieChart(categories: List<Pair<String, Long>>) {
 
 @Composable
 private fun SummaryCard(label: String, value: String, modifier: Modifier = Modifier) {
-    Card(modifier = modifier) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text(label, style = MaterialTheme.typography.bodySmall)
-            Text(value, style = MaterialTheme.typography.titleLarge)
+    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(.5.dp, MaterialTheme.colorScheme.outlineVariant)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+            Text(value, modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.titleLarge)
         }
     }
 }

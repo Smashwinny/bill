@@ -6,6 +6,17 @@ import java.time.YearMonth
 import java.time.ZoneId
 
 object LedgerBrowsing {
+    data class CategoryFrequency(val name: String, val count: Int, val amountCents: Long)
+
+    /** One active expense row is one occurrence; money never breaks a frequency tie. */
+    fun expenseFrequency(rows: List<ManualTransactionEntity>, month: YearMonth,
+                         resolveCategory: (ManualTransactionEntity) -> String,
+                         zone: ZoneId = ZoneId.systemDefault()): List<CategoryFrequency> =
+        filter(rows, month, null, zone).filter { it.type == ManualTransactionType.EXPENSE }
+            .groupBy(resolveCategory).map { (name, records) ->
+                CategoryFrequency(name, records.size, records.sumOf { it.amountCents })
+            }.sortedWith(compareByDescending<CategoryFrequency> { it.count }.thenBy { it.name })
+
     fun filter(rows: List<ManualTransactionEntity>, month: YearMonth?, day: LocalDate?,
                zone: ZoneId = ZoneId.systemDefault()): List<ManualTransactionEntity> = rows.filter {
         val date = Instant.ofEpochMilli(it.occurredAtMs).atZone(zone).toLocalDate()

@@ -54,4 +54,28 @@ class LedgerExperienceTest {
         assertEquals("b", LedgerBrowsing.defaultCategory(ManualTransactionType.EXPENSE, nodes, rows.map {
             if (it.id == "newer") it.copy(deletedAtMs = 10) else it }, null))
     }
+
+    @Test fun frequencyRanksByCountNotMoneyAndExcludesTrashIncomeTransfersAndOtherMonths() {
+        val month = YearMonth.of(2024, 2)
+        val small = (1..3).map { row("small-$it", "2024-02-29").copy(category = "饮食", amountCents = 100) }
+        val large = row("large", "2024-02-01").copy(category = "购物", amountCents = 900000)
+        val ignored = listOf(large.copy(id = "old", occurredAtMs = row("", "2024-01-31").occurredAtMs),
+            large.copy(id = "trash", deletedAtMs = 9), large.copy(id = "income", type = ManualTransactionType.INCOME),
+            large.copy(id = "transfer", type = ManualTransactionType.TRANSFER))
+        val result = LedgerBrowsing.expenseFrequency(small + large + ignored, month, { it.category }, zone)
+        assertEquals(listOf("饮食", "购物"), result.map { it.name })
+        assertEquals(listOf(3, 1), result.map { it.count })
+        assertEquals(listOf(300L, 900000L), result.map { it.amountCents })
+        assertTrue(LedgerBrowsing.expenseFrequency(small, month.minusMonths(2), { it.category }, zone).isEmpty())
+    }
+
+    @Test fun frequencyTiesAreStableAndUseResolvedCurrentCategoryNames() {
+        val rows = listOf(row("a", "2024-02-01", "b").copy(amountCents = 100),
+            row("z", "2024-02-01", "c").copy(amountCents = 900000))
+        val resolve: (ManualTransactionEntity) -> String = { if (it.categoryId == "b") "A 新分类" else "Z 新分类" }
+        val expected = LedgerBrowsing.expenseFrequency(rows, YearMonth.of(2024, 2), resolve, zone)
+        assertEquals(listOf("A 新分类", "Z 新分类"), expected.map { it.name })
+        assertEquals(expected, LedgerBrowsing.expenseFrequency(rows.reversed(), YearMonth.of(2024, 2), resolve, zone))
+        assertEquals(listOf(2), LedgerBrowsing.expenseFrequency(rows, YearMonth.of(2024, 2), { "合并后分类" }, zone).map { it.count })
+    }
 }

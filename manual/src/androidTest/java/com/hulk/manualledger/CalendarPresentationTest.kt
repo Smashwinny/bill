@@ -33,7 +33,7 @@ class CalendarPresentationTest {
                 note = null, createdAtMs = 1, updatedAtMs = 1)
         } }
         var selected: LocalDate? = null
-        compose.setContent { MaterialTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
+        compose.setContent { LedgerTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
             SpendingCalendar(YearMonth.of(2026, 2), rows, { it.category }, { selected = it })
         } } }
         val context = ApplicationProvider.getApplicationContext<Context>()

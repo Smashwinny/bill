@@ -12,8 +12,8 @@ android {
         applicationId = "com.hulk.manualledger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 25
-        versionName = "0.12.0-currency-sandtable"
+        versionCode = 26
+        versionName = "0.13.0-refined-ledger"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

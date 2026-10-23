@@ -99,7 +99,7 @@ internal fun DateScopeBar(month: YearMonth, day: LocalDate?, allDates: Boolean,
     val context = LocalContext.current
     val date = day ?: month.atDay(1)
     Column {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+        Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface, RoundedCornerShape(16.dp)), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween) {
             TextButton(onClick = { if (day != null) onDay(day.minusDays(1)) else onMonth(month.minusMonths(1)) },
                 modifier = Modifier.testTag("previous-period")) { Text(if (day != null) "‹ 前一天" else "‹ 上月") }
@@ -122,13 +122,13 @@ internal fun DateScopeBar(month: YearMonth, day: LocalDate?, allDates: Boolean,
 }
 
 internal fun ledgerCategoryColor(name: String): Color = when {
-    listOf("饮食", "食品", "餐饮", "早餐", "午餐", "晚餐").any(name::contains) -> Color(0xFFE9A34F)
-    listOf("交通", "行车", "出行").any(name::contains) -> Color(0xFF5B8DEF)
-    listOf("购物", "服饰", "衣服").any(name::contains) -> Color(0xFF9673DA)
-    listOf("居家", "住房", "房租").any(name::contains) -> Color(0xFF4FAE9D)
-    listOf("礼", "人情", "社交").any(name::contains) -> Color(0xFFE17F91)
-    listOf("医疗", "健康").any(name::contains) -> Color(0xFFCF7563)
-    else -> Color.hsl(Math.floorMod(name.hashCode() * 137, 360).toFloat(), 0.46f, 0.59f)
+    listOf("饮食", "食品", "餐饮", "早餐", "午餐", "晚餐").any(name::contains) -> Color(0xFFB5813F)
+    listOf("交通", "行车", "出行").any(name::contains) -> Color(0xFF58839F)
+    listOf("购物", "服饰", "衣服").any(name::contains) -> Color(0xFF8C79AE)
+    listOf("居家", "住房", "房租").any(name::contains) -> Color(0xFF4C9182)
+    listOf("礼", "人情", "社交").any(name::contains) -> Color(0xFFB57385)
+    listOf("医疗", "健康").any(name::contains) -> Color(0xFFB66C59)
+    else -> Color.hsl(Math.floorMod(name.substringBefore(CategoryCatalog.HIERARCHY_SEPARATOR).hashCode() * 137, 360).toFloat(), 0.30f, 0.47f)
 }
 
 @Composable
@@ -144,13 +144,14 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
         }
     }
     val maximum = dayGroups.values.maxOfOrNull { it.values.sum() }?.coerceAtLeast(1) ?: 1L
-    val legend = dayGroups.values.flatMap { it.keys }.distinct().sorted()
+    val legend = remember(month, expenses, resolveCategory) { LedgerBrowsing.expenseFrequency(expenses, month, resolveCategory) }
     Card(Modifier.fillMaxWidth().padding(top = 16.dp), shape = RoundedCornerShape(24.dp),
+        border = androidx.compose.foundation.BorderStroke(.5.dp, MaterialTheme.colorScheme.outlineVariant),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(Modifier.padding(12.dp)) {
+        Column(Modifier.padding(16.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
-                    Text("消费日历", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("消费日历", style = MaterialTheme.typography.titleMedium)
                     Text("高度看金额 · 颜色看分类", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                 }
                 FilterChip(selected = perspective, onClick = { perspective = !perspective },
@@ -216,12 +217,15 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
                 color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(top = 10.dp))
             if (legend.isEmpty()) Text("本月暂无支出", modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
             else {
+                Text("分类图例 · 按笔数", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(top = 16.dp))
                 val visible = if (fullLegend) legend else legend.take(4)
                 visible.chunked(2).forEach { pair ->
                     Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                        pair.forEach { name -> Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(8.dp).background(ledgerCategoryColor(name), RoundedCornerShape(3.dp)))
-                            Text(name, modifier = Modifier.padding(start = 5.dp), style = MaterialTheme.typography.labelSmall)
+                        pair.forEach { category -> Row(Modifier.weight(1f).padding(end = 8.dp).testTag("calendar-legend-${category.name}"), verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(7.dp).background(ledgerCategoryColor(category.name), RoundedCornerShape(3.dp)))
+                            Text(category.name, modifier = Modifier.weight(1f).padding(horizontal = 6.dp), style = MaterialTheme.typography.labelSmall)
+                            Text("${category.count} 笔", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                         } }
                         if (pair.size == 1) Spacer(Modifier.weight(1f))
                     }
