@@ -33,7 +33,7 @@ class ManualLedgerMigrationTest {
             close()
         }
 
-        helper.runMigrationsAndValidate(databaseName, 3, true, MANUAL_LEDGER_MIGRATION_1_2, MANUAL_LEDGER_MIGRATION_2_3).use { migrated ->
+        helper.runMigrationsAndValidate(databaseName, 4, true, MANUAL_LEDGER_MIGRATION_1_2, MANUAL_LEDGER_MIGRATION_2_3, MANUAL_LEDGER_MIGRATION_3_4).use { migrated ->
             migrated.query("SELECT id, category, category_id FROM manual_transaction").use { cursor ->
                 cursor.moveToFirst()
                 assertEquals("legacy", cursor.getString(0))
@@ -60,6 +60,23 @@ class ManualLedgerMigrationTest {
                 assertEquals(1234, it.getInt(0))
                 assertEquals("原始备注", it.getString(1))
                 assertEquals(true, it.isNull(2))
+            }
+        }
+    }
+
+    @Test fun currencyMigrationPreservesVersionThreeAmountsAndTrash() {
+        helper.createDatabase("currency-migration", 3).apply {
+            execSQL("""INSERT INTO manual_transaction
+                (id,type,amount_cents,currency,category,account,target_account,occurred_at_ms,note,created_at_ms,updated_at_ms,category_id,deleted_at_ms)
+                VALUES ('old','EXPENSE',1234,'CNY','餐饮','现金',NULL,1,'原始备注',1,1,NULL,2)""")
+            close()
+        }
+        helper.runMigrationsAndValidate("currency-migration", 4, true, MANUAL_LEDGER_MIGRATION_3_4).use { db ->
+            db.query("SELECT amount_cents, currency, note, deleted_at_ms, original_amount, exchange_rate FROM manual_transaction").use {
+                it.moveToFirst()
+                assertEquals(1234, it.getInt(0)); assertEquals("CNY", it.getString(1))
+                assertEquals("原始备注", it.getString(2)); assertEquals(2, it.getInt(3))
+                assertEquals(true, it.isNull(4)); assertEquals(true, it.isNull(5))
             }
         }
     }

@@ -97,6 +97,11 @@ data class ManualTransactionEntity(
     @ColumnInfo(name = "updated_at_ms") val updatedAtMs: Long,
     @ColumnInfo(name = "category_id") val categoryId: String? = null,
     @ColumnInfo(name = "deleted_at_ms") val deletedAtMs: Long? = null,
+    @ColumnInfo(name = "original_amount") val originalAmount: String? = null,
+    @ColumnInfo(name = "original_currency") val originalCurrency: String? = null,
+    @ColumnInfo(name = "exchange_rate") val exchangeRate: String? = null,
+    @ColumnInfo(name = "exchange_rate_date") val exchangeRateDate: String? = null,
+    @ColumnInfo(name = "exchange_rate_source") val exchangeRateSource: String? = null,
 )
 
 // Retain only the identity after a purge so replaying cloud history cannot
@@ -232,7 +237,7 @@ abstract class ManualLedgerDao {
 
 @Database(
     entities = [ManualTransactionEntity::class, SyncOutboxEntity::class, LedgerCategoryEntity::class, PurgedTransactionEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class ManualLedgerDatabase : RoomDatabase() {
@@ -266,6 +271,14 @@ val MANUAL_LEDGER_MIGRATION_2_3 = object : Migration(2, 3) {
     }
 }
 
+val MANUAL_LEDGER_MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        listOf("original_amount", "original_currency", "exchange_rate", "exchange_rate_date", "exchange_rate_source").forEach {
+            db.execSQL("ALTER TABLE manual_transaction ADD COLUMN $it TEXT")
+        }
+    }
+}
+
 data class NewManualTransaction(
     val stableId: String? = null,
     val type: ManualTransactionType,
@@ -275,6 +288,8 @@ data class NewManualTransaction(
     val targetAccount: String? = null,
     val occurredAtMs: Long = System.currentTimeMillis(),
     val note: String? = null,
+    val currency: String = "CNY",
+    val exchangeQuote: ExchangeQuote? = null,
     val preserveCategoryPath: Boolean = false,
     val categoryId: String? = null,
 )
@@ -316,11 +331,17 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
                         original.type != tx.type || original.amountCents != tx.amountCents ||
                             original.category != tx.category || original.account != tx.account ||
                             original.targetAccount != tx.targetAccount || original.occurredAtMs != tx.occurredAtMs ||
-                            original.note != tx.note
+                            original.note != tx.note || original.originalCurrency != tx.originalCurrency ||
+                            original.originalAmount != tx.originalAmount || original.exchangeRate != tx.exchangeRate ||
+                            original.exchangeRateDate != tx.exchangeRateDate || original.exchangeRateSource != tx.exchangeRateSource
                         )
                     val updated = original?.copy(
                         type = tx.type,
                         amountCents = tx.amountCents,
+                        currency = tx.currency,
+                        originalAmount = tx.originalAmount, originalCurrency = tx.originalCurrency,
+                        exchangeRate = tx.exchangeRate, exchangeRateDate = tx.exchangeRateDate,
+                        exchangeRateSource = tx.exchangeRateSource,
                         category = tx.category,
                         account = tx.account,
                         targetAccount = tx.targetAccount,
@@ -350,13 +371,19 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
     }
 
     private fun prepare(input: NewManualTransaction, now: Long): Pair<ManualTransactionEntity, SyncOutboxEntity> {
-        val cents = parseCents(input.amountText) ?: error("金额格式错误")
+        val booked = CurrencyAmounts.convert(input.amountText, input.currency, input.exchangeQuote)
         require(input.category.isNotBlank()) { "分类不能为空" }
         require(input.account.isNotBlank()) { "账户不能为空" }
         val tx = ManualTransactionEntity(
             id = input.stableId ?: UUID.randomUUID().toString(),
             type = input.type,
-            amountCents = cents,
+            amountCents = booked.cnyCents,
+            currency = "CNY",
+            originalAmount = booked.originalAmount.takeIf { booked.originalCurrency != "CNY" },
+            originalCurrency = booked.originalCurrency.takeIf { it != "CNY" },
+            exchangeRate = booked.quote?.cnyPerUnit,
+            exchangeRateDate = booked.quote?.date,
+            exchangeRateSource = booked.quote?.source,
             category = selectedCategoryPath(input),
             categoryId = input.categoryId,
             account = input.account.trim().take(40),
@@ -726,14 +753,20 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
     }
 
     fun update(id: String, input: NewManualTransaction): Boolean {
-        val cents = parseCents(input.amountText) ?: error("金额格式错误")
+        val booked = CurrencyAmounts.convert(input.amountText, input.currency, input.exchangeQuote)
         require(input.category.isNotBlank()) { "分类不能为空" }
         require(input.account.isNotBlank()) { "账户不能为空" }
         val original = db.dao().findTransaction(id)?.takeIf { it.deletedAtMs == null } ?: return false
         val now = System.currentTimeMillis()
         val updated = original.copy(
             type = input.type,
-            amountCents = cents,
+            amountCents = booked.cnyCents,
+            currency = "CNY",
+            originalAmount = booked.originalAmount.takeIf { booked.originalCurrency != "CNY" },
+            originalCurrency = booked.originalCurrency.takeIf { it != "CNY" },
+            exchangeRate = booked.quote?.cnyPerUnit,
+            exchangeRateDate = booked.quote?.date,
+            exchangeRateSource = booked.quote?.source,
             category = selectedCategoryPath(input),
             account = input.account.trim().take(40),
             targetAccount = input.targetAccount?.trim()?.take(40)?.ifBlank { null },
@@ -774,7 +807,7 @@ class ManualLedgerRepository internal constructor(private val db: ManualLedgerDa
                 context.applicationContext,
                 ManualLedgerDatabase::class.java,
                 "manual-ledger.db",
-            ).addMigrations(MANUAL_LEDGER_MIGRATION_1_2, MANUAL_LEDGER_MIGRATION_2_3).build()
+            ).addMigrations(MANUAL_LEDGER_MIGRATION_1_2, MANUAL_LEDGER_MIGRATION_2_3, MANUAL_LEDGER_MIGRATION_3_4).build()
             return ManualLedgerRepository(db)
         }
 
@@ -818,6 +851,12 @@ object ManualLedgerMigrationCodec {
         row.targetAccount?.let { append('"').append(json(it)).append('"') } ?: append("null")
         append(",\"occurred_at_ms\":").append(row.occurredAtMs).append(",\"note\":")
         row.note?.let { append('"').append(json(it)).append('"') } ?: append("null")
+        listOf("original_amount" to row.originalAmount, "original_currency" to row.originalCurrency,
+            "exchange_rate" to row.exchangeRate, "exchange_rate_date" to row.exchangeRateDate,
+            "exchange_rate_source" to row.exchangeRateSource).forEach { (key, value) ->
+            append(",\"").append(key).append("\":")
+            if (value == null) append("null") else append('"').append(json(value)).append('"')
+        }
         append(",\"updated_at_ms\":").append(row.updatedAtMs).append('}')
     }
 

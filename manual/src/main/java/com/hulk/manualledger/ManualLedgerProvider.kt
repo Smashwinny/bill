@@ -30,6 +30,7 @@ class ManualLedgerProvider : ContentProvider() {
                 addRow(arrayOf(
                     row.id, row.type.name, row.amountCents, row.currency, row.category,
                     row.account, row.targetAccount, row.occurredAtMs, row.note, row.updatedAtMs,
+                    row.originalAmount, row.originalCurrency, row.exchangeRate, row.exchangeRateDate, row.exchangeRateSource,
                 ))
             }
             setNotificationUri(appContext.contentResolver, TRANSACTIONS_URI)
@@ -43,6 +44,6 @@ class ManualLedgerProvider : ContentProvider() {
 
     companion object {
         val TRANSACTIONS_URI: Uri = Uri.parse("content://com.hulk.manualledger.sync/transactions")
-        val COLUMNS = arrayOf("id", "type", "amount_cents", "currency", "category", "account", "target_account", "occurred_at_ms", "note", "updated_at_ms")
+        val COLUMNS = arrayOf("id", "type", "amount_cents", "currency", "category", "account", "target_account", "occurred_at_ms", "note", "updated_at_ms", "original_amount", "original_currency", "exchange_rate", "exchange_rate_date", "exchange_rate_source")
     }
 }

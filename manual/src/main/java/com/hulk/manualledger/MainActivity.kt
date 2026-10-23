@@ -518,6 +518,8 @@ internal fun ManualLedgerScreen(
     var page by androidx.compose.runtime.remember { mutableStateOf(LedgerPage.OVERVIEW) }
     var type by androidx.compose.runtime.remember { mutableStateOf(ManualTransactionType.EXPENSE) }
     var amount by androidx.compose.runtime.remember { mutableStateOf("") }
+    var entryCurrency by remember { mutableStateOf("CNY") }
+    val currencyEntry = rememberCurrencyEntry(amount, entryCurrency)
     var categoryId by remember { mutableStateOf<String?>(null) }
     val entryPreferences = LocalContext.current.getSharedPreferences("manual_entry", android.content.Context.MODE_PRIVATE)
     val category = CategoryTree.path(categoryId, categoryNodes)
@@ -621,6 +623,8 @@ internal fun ManualLedgerScreen(
                 occurredAtMs = occurredAtMs,
                 categoryNodes = categoryNodes,
                 selectedCategoryId = categoryId,
+                currencyEntry = currencyEntry,
+                onCurrency = { entryCurrency = it },
                 onType = { if (type != it) { type = it; categoryId = null } },
                 onAmount = { amount = it.take(120) },
                 onCategory = { categoryId = it },
@@ -630,7 +634,9 @@ internal fun ManualLedgerScreen(
                 onSave = {
                     onSave(NewManualTransaction(
                         type = type,
-                        amountText = AmountExpression.normalized(amount) ?: return@RecordPage,
+                        amountText = currencyEntry.result.getOrNull()?.originalAmount ?: return@RecordPage,
+                        currency = currencyEntry.currency,
+                        exchangeQuote = currencyEntry.result.getOrNull()?.quote,
                         category = category,
                         categoryId = categoryId,
                         account = account,
@@ -880,6 +886,8 @@ internal fun RecordPage(
     onNote: (String) -> Unit,
     onOccurredAt: (Long) -> Unit,
     onSave: () -> Unit,
+    currencyEntry: CurrencyEntryState = rememberCurrencyEntry(amount, "CNY"),
+    onCurrency: (String) -> Unit = {},
 ) {
     var choosingCategory by remember { mutableStateOf(false) }
     if (choosingCategory) LeafCategoryDialog(type, categoryNodes, selectedCategoryId,
@@ -905,7 +913,7 @@ internal fun RecordPage(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("金额", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
-                    AmountField(amount, onAmount)
+                    AmountField(amount, onAmount, currencyEntry, onCurrency)
                     Text("消费分类", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 14.dp))
                     TextButton(onClick = { choosingCategory = true }) {
                         Text(category.ifBlank { "请选择分类" })
@@ -924,7 +932,7 @@ internal fun RecordPage(
             }
             Button(
                 onClick = onSave,
-                enabled = AmountExpression.normalized(amount) != null && category.isNotBlank() && account.isNotBlank(),
+                enabled = currencyEntry.result.isSuccess && category.isNotBlank() && account.isNotBlank(),
                 modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
                 shape = RoundedCornerShape(16.dp),
             ) { Text("保存到本机", fontWeight = FontWeight.Bold) }
@@ -1120,6 +1128,10 @@ private fun TransactionRow(
             Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Text(row.category, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text("${row.account} · ${formatTime(row.occurredAtMs)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                row.originalAmount?.let { original ->
+                    Text("${row.originalCurrency} $original · 汇率 ${row.exchangeRateDate}", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary)
+                }
                 row.note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 if (onEdit != null || onChangeCategory != null || onDelete != null) Row {
                     onChangeCategory?.let { TextButton(onClick = it) { Text("改分类") } }
@@ -1143,7 +1155,9 @@ private fun EditTransactionDialog(
     onSave: (NewManualTransaction) -> Unit,
 ) {
     var type by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.type) }
-    var amount by androidx.compose.runtime.remember(row.id) { mutableStateOf("%d.%02d".format(row.amountCents / 100, row.amountCents % 100)) }
+    var amount by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.originalAmount ?: AmountExpression.format(row.amountCents)) }
+    var entryCurrency by remember(row.id) { mutableStateOf(row.originalCurrency ?: "CNY") }
+    val currencyEntry = rememberCurrencyEntry(amount, entryCurrency, row.savedQuote())
     var selectedCategoryId by remember(row.id) { mutableStateOf(row.categoryId) }
     var category by remember(row.id) { mutableStateOf(row.category) }
     var account by androidx.compose.runtime.remember(row.id) { mutableStateOf(row.account) }
@@ -1200,7 +1214,7 @@ private fun EditTransactionDialog(
                         Text("${typeLabel(type)}  ›", fontWeight = FontWeight.SemiBold)
                     }
                 }
-                AmountField(amount, { amount = it.take(120) })
+                AmountField(amount, { amount = it.take(120) }, currencyEntry, { entryCurrency = it })
                 TextButton(onClick = { choosingCategory = true }, modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Text("分类", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
@@ -1215,11 +1229,13 @@ private fun EditTransactionDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = AmountExpression.normalized(amount) != null && category.isNotBlank() && account.isNotBlank(),
+                enabled = currencyEntry.result.isSuccess && category.isNotBlank() && account.isNotBlank(),
                 onClick = {
                     onSave(NewManualTransaction(
                         type = type,
-                        amountText = AmountExpression.normalized(amount) ?: return@TextButton,
+                        amountText = currencyEntry.result.getOrNull()?.originalAmount ?: return@TextButton,
+                        currency = currencyEntry.currency,
+                        exchangeQuote = currencyEntry.result.getOrNull()?.quote,
                         category = category,
                         categoryId = selectedCategoryId,
                         account = account,

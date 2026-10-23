@@ -44,6 +44,16 @@ class LedgerStoreTest(unittest.TestCase):
         self.assertEqual(2, len(replay["changes"]))
         self.assertEqual([1600, 2456], [row["payload"]["amount_cents"] for row in replay["changes"]])
 
+    def test_foreign_currency_snapshot_survives_replay(self):
+        item = event(amount=7123)
+        item["payload"].update(original_amount="10.00", original_currency="USD",
+                               exchange_rate="7.12345", exchange_rate_date="2026-10-22",
+                               exchange_rate_source="Frankfurter")
+        self.store.sync(0, [item])
+        replayed = self.store.sync(0, [])["changes"][0]["payload"]
+        self.assertEqual(item["payload"], replayed)
+        self.assertEqual("CNY", replayed["currency"])
+
     def test_daily_online_backup_is_created(self):
         self.store.sync(0, [event()])
         backups = list((Path(self.temp.name) / "backups").glob("ledger-*.sqlite3"))

@@ -62,6 +62,7 @@ class LedgerExperienceUiTest {
                 }
             } }
         }
+        compose.onNodeWithTag("calendar-perspective").performScrollTo().performClick()
         compose.onNodeWithTag("calendar-day-2").performScrollTo().performClick()
         compose.onNodeWithText("2026-09-02 的流水").assertIsDisplayed()
         compose.onNodeWithTag("flow-list").performScrollToNode(hasText("流水-7"))
@@ -87,8 +88,7 @@ class LedgerExperienceUiTest {
             compose.onNodeWithText("计算验收").performClick()
             compose.onNodeWithTag("amount-expression").performTextReplacement("3+4")
             compose.onNodeWithText("= ¥7.00").assertIsDisplayed()
-            compose.onNodeWithTag("calculator-=").performClick()
-            compose.onNodeWithText("保存修改").performClick()
+                compose.onNodeWithText("保存修改").performClick()
             compose.runOnIdle { assertEquals(700L, repo.list().single().amountCents) }
         } finally { db.close() }
     }
@@ -99,7 +99,7 @@ class LedgerExperienceUiTest {
             MaterialTheme { RecordPage(ManualTransactionType.EXPENSE, amount, "礼金", "现金", "", 1,
                 categories, "gift", {}, { amount = it }, {}, {}, {}, {}, {}) }
         }
-        compose.onNodeWithTag("calculator-+").performClick()
+        compose.onNodeWithTag("amount-expression").performTextReplacement("3+")
         compose.onNodeWithText("保存到本机").performScrollTo().assertIsNotEnabled()
         compose.onNodeWithTag("amount-expression").performScrollTo().performTextReplacement("3+4")
         compose.onNodeWithText("保存到本机").performScrollTo().assertIsEnabled()

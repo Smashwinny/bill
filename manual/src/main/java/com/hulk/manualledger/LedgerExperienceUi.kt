@@ -30,34 +30,6 @@ import androidx.compose.ui.unit.sp
 import java.time.LocalDate
 import java.time.YearMonth
 
-@Composable
-internal fun AmountField(value: String, onValue: (String) -> Unit) {
-    val result = remember(value) { AmountExpression.evaluate(value) }
-    val cents = result.getOrNull()
-    Column {
-        OutlinedTextField(value, { onValue(it.take(120)) },
-            label = { Text("金额 / 算式") }, placeholder = { Text("例如 3+4 或 (12+8)÷2") },
-            prefix = { Text("¥") }, singleLine = true,
-            textStyle = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
-            isError = value.isNotBlank() && cents == null,
-            supportingText = {
-                Text(if (value.isBlank()) "支持加减乘除、括号；结果四舍五入到分"
-                    else cents?.let { "= ¥${AmountExpression.format(it)}" }
-                        ?: (result.exceptionOrNull()?.message ?: "金额过大或算式无效"))
-            }, modifier = Modifier.fillMaxWidth().testTag("amount-expression"), shape = RoundedCornerShape(16.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            listOf("+", "−", "×", "÷", "(", ")", "=").forEach { key ->
-                TextButton(onClick = { if (key == "=") cents?.let { onValue(AmountExpression.format(it)) }
-                    else onValue((value + key).take(120)) },
-                    enabled = key != "=" || cents != null,
-                    contentPadding = PaddingValues(0.dp), modifier = Modifier.weight(1f).testTag("calculator-$key")) {
-                    Text(key, fontSize = 19.sp)
-                }
-            }
-        }
-    }
-}
-
 /** Only siblings are shown together. Entering a branch never silently selects its first leaf. */
 @Composable
 internal fun LeafCategoryDialog(type: ManualTransactionType, categories: List<LedgerCategoryEntity>,
@@ -182,8 +154,11 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
                     Text("高度看金额 · 颜色看分类", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                 }
                 FilterChip(selected = perspective, onClick = { perspective = !perspective },
-                    label = { Text(if (perspective) "3D 视角" else "平面") }, modifier = Modifier.testTag("calendar-perspective"))
+                    label = { Text(if (perspective) "3D 沙盘" else "平面") }, modifier = Modifier.testTag("calendar-perspective"))
             }
+            if (perspective) {
+                CalendarSandtable(month, dayGroups, maximum, onDay)
+            } else {
             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                 listOf("一", "二", "三", "四", "五", "六", "日").forEach { Text(it, Modifier.weight(1f), textAlign = TextAlign.Center,
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary) }
@@ -236,7 +211,8 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
                     repeat(7 - week.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
-            Text("点日期查看当天全部收支 · 柱高按当月统一比例", style = MaterialTheme.typography.labelSmall,
+            }
+            Text(if (perspective) "拖动旋转与俯仰 · 双指缩放 · 点日期看流水" else "点日期查看当天全部收支", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(top = 10.dp))
             if (legend.isEmpty()) Text("本月暂无支出", modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
             else {

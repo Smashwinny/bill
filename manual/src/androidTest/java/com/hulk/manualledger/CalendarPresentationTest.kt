@@ -7,6 +7,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsProperties
+import org.junit.Assert.assertNotEquals
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -40,7 +43,17 @@ class CalendarPresentationTest {
             }
         }
         capture("calendar-3d.png")
-        compose.onNodeWithTag("calendar-day-1").performClick()
+        val scene = compose.onNodeWithTag("calendar-sandtable")
+        val original = scene.fetchSemanticsNode().config[SemanticsProperties.StateDescription]
+        scene.performTouchInput { swipe(center, center + Offset(120f, -100f), 600) }
+        assertNotEquals(original, scene.fetchSemanticsNode().config[SemanticsProperties.StateDescription])
+        capture("sandtable-rotated.png")
+        compose.onNodeWithTag("reset-sandtable").performClick()
+        assertEquals(original, scene.fetchSemanticsNode().config[SemanticsProperties.StateDescription])
+        val bounds = scene.fetchSemanticsNode().boundsInRoot
+        val center = CalendarProjection.dayCenter(YearMonth.of(2026, 2), 1)
+        val point = CalendarProjection(bounds.width, bounds.height, -22f, 52f, 1f).project(center.copy(x=center.x+.055f,y=center.y-.075f,z=.015f+22f/62f*2.2f))
+        scene.performTouchInput { click(Offset(point.x,point.y)) }
         compose.runOnIdle { assertEquals(LocalDate.of(2026, 2, 1), selected) }
         compose.onNodeWithTag("calendar-perspective").performClick()
         compose.onNodeWithText("平面").assertIsDisplayed()

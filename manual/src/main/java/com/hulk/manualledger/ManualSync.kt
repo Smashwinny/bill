@@ -183,20 +183,7 @@ class ManualSyncWorker(context: Context, params: WorkerParameters) : CoroutineWo
     private fun parseRemote(payload: JSONObject): RemoteLedgerChange {
         val id = payload.getString("id")
         if (payload.optBoolean("deleted", false)) return RemoteLedgerChange(id, true, null, payload.getLong("updated_at_ms"))
-        val updated = payload.getLong("updated_at_ms")
-        val entity = ManualTransactionEntity(
-            id = id,
-            type = ManualTransactionType.valueOf(payload.getString("type")),
-            amountCents = payload.getLong("amount_cents"),
-            currency = payload.optString("currency", "CNY"),
-            category = payload.getString("category").take(80),
-            account = payload.getString("account").take(40),
-            targetAccount = payload.optNullableString("target_account")?.take(40),
-            occurredAtMs = payload.getLong("occurred_at_ms"),
-            note = payload.optNullableString("note")?.take(200),
-            createdAtMs = updated,
-            updatedAtMs = updated,
-        )
+        val entity = decodeRemoteTransaction(payload)
         return RemoteLedgerChange(id, false, entity)
     }
 
@@ -204,9 +191,6 @@ class ManualSyncWorker(context: Context, params: WorkerParameters) : CoroutineWo
         val next = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(15)
         events.forEach { dao.postpone(it.eventId, next) }
     }
-
-    private fun JSONObject.optNullableString(name: String): String? =
-        if (!has(name) || isNull(name)) null else getString(name)
 
     private data class SyncResponse(val cursor: Long, val hasMore: Boolean, val changes: List<RemoteLedgerChange>)
 }
@@ -247,3 +231,28 @@ private object SyncSecretStore {
         }.generateKey()
     }
 }
+
+internal fun decodeRemoteTransaction(payload: JSONObject): ManualTransactionEntity {
+    val id = payload.getString("id")
+    return ManualTransactionEntity(
+            id = id,
+            type = ManualTransactionType.valueOf(payload.getString("type")),
+            amountCents = payload.getLong("amount_cents"),
+            currency = payload.optString("currency", "CNY"),
+            originalAmount = payload.optNullableString("original_amount"),
+            originalCurrency = payload.optNullableString("original_currency"),
+            exchangeRate = payload.optNullableString("exchange_rate"),
+            exchangeRateDate = payload.optNullableString("exchange_rate_date"),
+            exchangeRateSource = payload.optNullableString("exchange_rate_source"),
+            category = payload.getString("category").take(80),
+            account = payload.getString("account").take(40),
+            targetAccount = payload.optNullableString("target_account")?.take(40),
+            occurredAtMs = payload.getLong("occurred_at_ms"),
+            note = payload.optNullableString("note")?.take(200),
+            createdAtMs = payload.getLong("updated_at_ms"),
+            updatedAtMs = payload.getLong("updated_at_ms"),
+        )
+}
+
+private fun JSONObject.optNullableString(name: String): String? =
+    if (!has(name) || isNull(name)) null else getString(name)
