@@ -143,6 +143,7 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
                 .mapValues { (_, records) -> records.sumOf { it.amountCents } }.toSortedMap()
         }
     }
+    val cityFloors = remember(month, expenses, resolveCategory) { CityCalendarModel.floors(expenses, month, resolveCategory) }
     val maximum = dayGroups.values.maxOfOrNull { it.values.sum() }?.coerceAtLeast(1) ?: 1L
     val legend = remember(month, expenses, resolveCategory) { LedgerBrowsing.expenseFrequency(expenses, month, resolveCategory) }
     Card(Modifier.fillMaxWidth().padding(top = 16.dp), shape = RoundedCornerShape(24.dp),
@@ -152,13 +153,13 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
                     Text("消费日历", style = MaterialTheme.typography.titleMedium)
-                    Text("高度看金额 · 颜色看分类", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                    Text(if (perspective) "一日一栋 · 彩色一层一笔" else "高度看金额 · 颜色看分类", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                 }
                 FilterChip(selected = perspective, onClick = { perspective = !perspective },
-                    label = { Text(if (perspective) "3D 沙盘" else "平面") }, modifier = Modifier.testTag("calendar-perspective"))
+                    label = { Text(if (perspective) "3D 小城" else "平面") }, modifier = Modifier.testTag("calendar-perspective"))
             }
             if (perspective) {
-                CalendarSandtable(month, dayGroups, maximum, onDay)
+                CalendarSandtable(month, cityFloors, onDay)
             } else {
             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                 listOf("一", "二", "三", "四", "五", "六", "日").forEach { Text(it, Modifier.weight(1f), textAlign = TextAlign.Center,

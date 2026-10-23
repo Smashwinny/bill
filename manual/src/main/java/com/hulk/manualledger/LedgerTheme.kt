@@ -3,8 +3,6 @@ package com.hulk.manualledger
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -61,15 +59,18 @@ internal fun LedgerTheme(skin: LedgerSkin = LedgerSkin.GREEN, content: @Composab
 }
 
 internal fun categoryIcon(name: String): ImageVector = when {
-    listOf("饮食", "食品", "餐饮", "早餐", "午餐", "晚餐").any(name::contains) -> Icons.Outlined.Restaurant
-    listOf("交通", "行车", "出行").any(name::contains) -> Icons.Outlined.DirectionsTransit
-    listOf("购物", "服饰", "衣服").any(name::contains) -> Icons.Outlined.ShoppingBag
-    listOf("居家", "住房", "房租").any(name::contains) -> Icons.Outlined.Home
-    listOf("礼", "人情", "社交").any(name::contains) -> Icons.Outlined.CardGiftcard
-    listOf("医疗", "健康").any(name::contains) -> Icons.Outlined.FavoriteBorder
-    listOf("娱乐", "休闲").any(name::contains) -> Icons.Outlined.Celebration
-    listOf("工资", "收入").any(name::contains) -> Icons.Outlined.AccountBalanceWallet
-    else -> Icons.Outlined.Category
+    listOf("饮食", "食品", "餐饮", "早餐", "午餐", "晚餐").any(name::contains) -> LedgerIcons.Food
+    listOf("交通", "行车", "出行").any(name::contains) -> LedgerIcons.Transit
+    listOf("购物", "服饰", "衣服").any(name::contains) -> LedgerIcons.Bag
+    listOf("居家", "住房", "房租").any(name::contains) -> LedgerIcons.Home
+    listOf("礼", "人情", "社交").any(name::contains) -> LedgerIcons.Gift
+    listOf("医疗", "健康").any(name::contains) -> LedgerIcons.Heart
+    listOf("娱乐", "休闲").any(name::contains) -> LedgerIcons.Leisure
+    listOf("工资", "收入").any(name::contains) -> LedgerIcons.Wallet
+    listOf("教育", "学习", "书", "培训").any(name::contains) -> LedgerIcons.Book
+    listOf("旅游", "旅行", "酒店").any(name::contains) -> LedgerIcons.Travel
+    listOf("宠物", "猫", "狗").any(name::contains) -> LedgerIcons.Pet
+    else -> LedgerIcons.Category
 }
 
 @Composable

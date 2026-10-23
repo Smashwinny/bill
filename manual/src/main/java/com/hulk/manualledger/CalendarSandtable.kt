@@ -19,8 +19,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -48,7 +46,7 @@ internal class CalendarProjection(val width: Float, val height: Float, yaw: Floa
         val depth = y * cos(pitchRadians) + p.z * sin(pitchRadians)
         val perspective = 22.0 / (22.0 - depth)
         return ProjectedPoint((width / 2 + x * scale * perspective).toFloat(),
-            (height * 0.57 + (y * sin(pitchRadians) - p.z * cos(pitchRadians)) * scale * perspective).toFloat(), depth.toFloat())
+            (height * 0.52 + (y * sin(pitchRadians) - p.z * cos(pitchRadians)) * scale * perspective).toFloat(), depth.toFloat())
     }
     companion object {
         fun dayCenter(month: YearMonth, day: Int): ScenePoint {
@@ -69,60 +67,30 @@ internal class CalendarProjection(val width: Float, val height: Float, yaw: Floa
         }
     }
 }
-private data class CalendarFace(val corners: List<ScenePoint>, val color: Color, val day: Int? = null,
-                                val label: String? = null, val labelPosition: ScenePoint? = null)
-
 @Composable
-internal fun CalendarSandtable(month: YearMonth, segments: Map<Int, Map<String, Long>>, maximum: Long, onDay: (LocalDate) -> Unit) {
+internal fun CalendarSandtable(month: YearMonth, days: Map<Int, List<CityFloor>>, onDay: (LocalDate) -> Unit) {
     var yaw by remember { mutableStateOf(-22f) }
     var pitch by remember { mutableStateOf(52f) }
     var zoom by remember { mutableStateOf(1f) }
     val hitFaces = remember { java.util.concurrent.atomic.AtomicReference<List<Pair<List<ProjectedPoint>, Int>>>(emptyList()) }
     val latestOnDay by rememberUpdatedState(onDay)
-    val offset = month.atDay(1).dayOfWeek.value - 1
-    val weeks = (offset + month.lengthOfMonth() + 6) / 7
-    val todayColor = MaterialTheme.colorScheme.primaryContainer
-    val faces = remember(month, segments, maximum, todayColor) {
-        buildList {
-            fun box(x0: Float, x1: Float, y0: Float, y1: Float, z0: Float, z1: Float, color: Color, day: Int?) {
-                val a = ScenePoint(x0,y0,z0); val b = ScenePoint(x1,y0,z0); val c = ScenePoint(x1,y1,z0); val d = ScenePoint(x0,y1,z0)
-                val e = a.copy(z=z1); val f = b.copy(z=z1); val g = c.copy(z=z1); val h = d.copy(z=z1)
-                add(CalendarFace(listOf(a,b,f,e), lerp(color,Color.Black,0.15f),day))
-                add(CalendarFace(listOf(b,c,g,f), lerp(color,Color.Black,0.23f),day))
-                add(CalendarFace(listOf(c,d,h,g), color,day))
-                add(CalendarFace(listOf(d,a,e,h), lerp(color,Color.White,0.08f),day))
-                add(CalendarFace(listOf(e,f,g,h), lerp(color,Color.White,0.22f),day))
-            }
-            box(-3.58f,3.58f,-weeks/2f-.08f,weeks/2f+.08f,-.20f,-.035f,Color(0xFFB6BCB3),null)
-            repeat(weeks*7) { slot ->
-                val day = (slot-offset+1).takeIf { it in 1..month.lengthOfMonth() }
-                val x = slot%7-3f; val y = slot/7-(weeks-1)/2f
-                val color = when { day == null -> Color(0xFFE5E7DF)
-                    month.atDay(day) == LocalDate.now() -> todayColor
-                    slot%7 >= 5 -> Color(0xFFE8EDE5)
-                    else -> Color(0xFFFAFBF6) }
-                add(CalendarFace(listOf(ScenePoint(x-.48f,y-.48f),ScenePoint(x+.48f,y-.48f),ScenePoint(x+.48f,y+.48f),ScenePoint(x-.48f,y+.48f)),
-                    color,day,day?.toString(),ScenePoint(x-.30f,y+.31f,.005f)))
-                if (day != null) {
-                    var z = .015f
-                    segments[day].orEmpty().forEach { (name,cents) ->
-                        val top = z + (cents.toDouble()/maximum*2.2).toFloat()
-                        box(x-.16f,x+.27f,y-.29f,y+.14f,z,top,ledgerCategoryColor(name),day)
-                        z=top
-                    }
-                }
-            }
-        }
-    }
+    val today = LocalDate.now().takeIf { YearMonth.from(it) == month }?.dayOfMonth
+    val scene = remember(month, days, today) { buildCityScene(month, days, today) }
+    val maxCount = days.values.maxOfOrNull { it.size } ?: 1
+    val primary = MaterialTheme.colorScheme.primary
+    val weeks = (month.atDay(1).dayOfWeek.value - 1 + month.lengthOfMonth() + 6) / 7
     Box {
-        Canvas(Modifier.fillMaxWidth().height(350.dp).clip(RoundedCornerShape(18.dp))
-            .background(Brush.verticalGradient(listOf(Color(0xFFF8F8F4), Color(0xFFE9EDE5))))
+        Canvas(Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(18.dp))
+            .background(Brush.verticalGradient(listOf(Color(0xFFF5F7F1), Color(0xFFE1E9DE))))
             .testTag("calendar-sandtable")
             .semantics {
-                contentDescription = "$month 消费沙盘"
+                contentDescription = "$month 消费小城，一天一栋，彩色一层一笔支出"
                 stateDescription = "旋转 ${yaw.toInt()} 度，俯角 ${pitch.toInt()} 度"
                 customActions = (1..month.lengthOfMonth()).map { day ->
-                    CustomAccessibilityAction("${day}日 查看流水") { latestOnDay(month.atDay(day));true }
+                    val records = days[day].orEmpty()
+                    CustomAccessibilityAction("${day}日，${records.size} 笔，支出 ${AmountExpression.format(records.sumOf { it.amountCents })} 元，查看流水") {
+                        latestOnDay(month.atDay(day)); true
+                    }
                 }
             }
             .pointerInput(month) {
@@ -133,35 +101,64 @@ internal fun CalendarSandtable(month: YearMonth, segments: Map<Int, Map<String, 
                 detectTransformGestures { _,pan,scale,rotation ->
                     yaw = ((yaw + pan.x/size.width*180f + rotation) % 360f)
                     pitch = (pitch - pan.y/size.height*100f).coerceIn(18f,82f)
-                    zoom = (zoom*scale).coerceIn(.65f,1.5f)
+                    zoom = (zoom*scale).coerceIn(.65f,1.8f)
                 }
             }) {
             val camera = CalendarProjection(size.width,size.height,yaw,pitch,zoom)
-            drawOval(Brush.radialGradient(listOf(Color(0xFF747E71).copy(alpha = .24f), Color.Transparent),
-                center = Offset(size.width * .5f, size.height * .70f), radius = size.width * .43f),
+            drawOval(Brush.radialGradient(listOf(Color(0xFF647D69).copy(alpha=.22f),Color.Transparent),
+                center=Offset(size.width*.5f,size.height*.70f),radius=size.width*.43f),
                 Offset(size.width*.05f,size.height*.59f),Size(size.width*.9f,size.height*.22f))
-            fun projected(part: List<CalendarFace>) = part.map { face -> face to face.corners.map(camera::project) }
-                .sortedBy { it.second.map { p -> p.depth }.average() }
-            // Draw the foundation underneath all cells. Its large top face must not
-            // participate in centroid sorting, which would cover the far half of the calendar.
-            val sorted = projected(faces.take(5)) + projected(faces.drop(5))
-            val labels = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize=11.sp.toPx();color=Color(0xFF465347).toArgb();isFakeBoldText=true }
-            sorted.forEach { (face,points) ->
-                val path=Path().apply { moveTo(points[0].x,points[0].y);points.drop(1).forEach { lineTo(it.x,it.y) };close() }
-                drawPath(path,face.color)
-                if(face.label!=null) {
-                    drawPath(path,Color.White.copy(alpha=.8f),style=Stroke(.6.dp.toPx()))
-                    val p=camera.project(face.labelPosition!!)
-                    drawContext.canvas.nativeCanvas.drawText(face.label,p.x,p.y,labels)
+            fun path(points: List<ProjectedPoint>) = Path().apply {
+                moveTo(points[0].x,points[0].y);points.drop(1).forEach { lineTo(it.x,it.y) };close()
+            }
+            fun project(face: CityFace): Triple<CityFace, List<ProjectedPoint>, Float> {
+                val points = face.corners.map(camera::project)
+                return Triple(face, points, points.sumOf { it.depth.toDouble() }.toFloat() / points.size)
+            }
+            val ground = scene.ground.map(::project)
+            val buildings = scene.buildings.map(::project).sortedBy { it.third }
+            val painted = ground + buildings
+            painted.forEach { (face,points) ->
+                drawPath(path(points),face.color)
+                face.windows.forEach { pane ->
+                    drawPath(path(pane.map(camera::project)),Color(0xFFF9F1D3).copy(alpha=.84f))
                 }
             }
-            labels.textSize=10.sp.toPx()
+            val hits = painted.mapNotNull { (face,points) -> face.day?.let { points to it } }.toMutableList()
+            val labels = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                textSize=9.sp.toPx();color=Color(0xFF364D46).toArgb();isFakeBoldText=true;textAlign=Paint.Align.CENTER
+            }
+            // Screen-facing date plaques stay legible at any angle and use the same hit area.
+            val occupiedLabels = mutableListOf<android.graphics.RectF>()
+            val markers = (1..month.lengthOfMonth()).map { day ->
+                day to camera.project(CityCalendarModel.marker(month, day, days[day].orEmpty().size, maxCount))
+            }.sortedByDescending { it.second.depth }
+            markers.forEach { (day, p) ->
+                val count = days[day].orEmpty().size
+                val w=labels.measureText(day.toString())+5.dp.toPx();val h=12.dp.toPx()
+                val rect=android.graphics.RectF(p.x-w/2,p.y-h/2,p.x+w/2,p.y+h/2)
+                // Do not put a date badge on a nearer building belonging to a different day.
+                val occluder = buildings.lastOrNull { (face, points, depth) ->
+                    face.day != day && depth > p.depth && CalendarProjection.contains(points,p.x,p.y)
+                }
+                if (occluder != null) return@forEach
+                val clearance = android.graphics.RectF(rect).apply { inset(-1.dp.toPx(), -1.dp.toPx()) }
+                if (occupiedLabels.any { android.graphics.RectF.intersects(it, clearance) }) return@forEach
+                occupiedLabels += clearance
+                val ink=Paint(Paint.ANTI_ALIAS_FLAG).apply { color=(if(day==today) primary else Color(0xFFFFFEF7).copy(alpha=.94f)).toArgb() }
+                if (count > 0) drawLine(Color(0xFFFFFEF7),Offset(p.x,rect.bottom),Offset(p.x,rect.bottom+3.dp.toPx()),strokeWidth=1.dp.toPx())
+                drawContext.canvas.nativeCanvas.drawRoundRect(rect,3.dp.toPx(),3.dp.toPx(),ink)
+                labels.color=(if(day==today) Color.White else Color(0xFF364D46)).toArgb()
+                drawContext.canvas.nativeCanvas.drawText(day.toString(),p.x,p.y-(labels.ascent()+labels.descent())/2,labels)
+                hits += listOf(ProjectedPoint(rect.left,rect.top,p.depth),ProjectedPoint(rect.right,rect.top,p.depth),
+                    ProjectedPoint(rect.right,rect.bottom,p.depth),ProjectedPoint(rect.left,rect.bottom,p.depth)) to day
+            }
+            labels.color=Color(0xFF52685F).toArgb()
             listOf("一","二","三","四","五","六","日").forEachIndexed { i,text ->
                 val p=camera.project(ScenePoint(i-3f,-weeks/2f-.30f))
                 drawContext.canvas.nativeCanvas.drawText(text,p.x,p.y,labels)
             }
-            // The same projected polygons power drawing and picking, including rotated columns.
-            hitFaces.set(sorted.mapNotNull { (face,points) -> face.day?.let { points to it } })
+            hitFaces.set(hits)
         }
         TextButton(onClick = { yaw=-22f;pitch=52f;zoom=1f },
             modifier = Modifier.align(Alignment.TopEnd).testTag("reset-sandtable")) { Text("复位视角") }

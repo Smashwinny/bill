@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="launcher_red">#E32636</color>
-    <color name="launcher_green">#0B705F</color>
+ <color name="launcher_red">#963F51</color>
+ <color name="launcher_green">#285C50</color>
 </resources>

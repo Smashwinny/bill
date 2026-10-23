@@ -38,22 +38,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountBalanceWallet
-import androidx.compose.material.icons.filled.AddCircle
-import androidx.compose.material.icons.filled.Analytics
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.CloudDone
-import androidx.compose.material.icons.filled.CloudQueue
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DragIndicator
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.automirrored.filled.ReceiptLong
-import androidx.compose.material.icons.filled.Savings
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -73,8 +57,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material.icons.outlined.*
-import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -660,11 +642,11 @@ internal fun ManualLedgerScreen(
 }
 
 private enum class LedgerPage(val title: String, val icon: ImageVector) {
-    OVERVIEW("首页", Icons.Outlined.Home),
-    FLOW("流水", Icons.AutoMirrored.Outlined.ReceiptLong),
-    RECORD("记一笔", Icons.Default.AddCircle),
-    ANALYSIS("分析", Icons.Outlined.Analytics),
-    SETTINGS("设置", Icons.Outlined.Settings),
+    OVERVIEW("首页", LedgerIcons.Home),
+    FLOW("流水", LedgerIcons.Receipt),
+    RECORD("记一笔", LedgerIcons.Add),
+    ANALYSIS("分析", LedgerIcons.Chart),
+    SETTINGS("设置", LedgerIcons.Settings),
 }
 
 @Composable
@@ -680,7 +662,7 @@ private fun LedgerHeader(pendingCount: Long, cloudConfigured: Boolean, message: 
         ) {
             Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
                 Icon(
-                    if (!cloudConfigured) Icons.Default.AccountBalanceWallet else if (pendingCount == 0L) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                    if (!cloudConfigured) LedgerIcons.Wallet else if (pendingCount == 0L) LedgerIcons.CloudDone else LedgerIcons.CloudQueue,
                     contentDescription = null,
                     modifier = Modifier.size(18.dp),
                     tint = if (!cloudConfigured || pendingCount == 0L) MaterialTheme.colorScheme.primary else Color(0xFF9A6200),
@@ -746,13 +728,13 @@ private fun OverviewPage(
                     Text(money(balance), modifier = Modifier.padding(top = 8.dp), color = Color.White, style = MaterialTheme.typography.headlineLarge)
                     androidx.compose.material3.HorizontalDivider(Modifier.padding(top = 18.dp), color = Color.White.copy(alpha = .14f))
                     Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                        MetricWithIcon(Icons.Default.ArrowDownward, "收入", money(income), Color(0xFFBFF5D4))
-                        MetricWithIcon(Icons.Default.ArrowUpward, "支出", money(expense), Color(0xFFFFD59C))
+                        MetricWithIcon(LedgerIcons.ArrowDown, "收入", money(income), Color(0xFFBFF5D4))
+                        MetricWithIcon(LedgerIcons.ArrowUp, "支出", money(expense), Color(0xFFFFD59C))
                     }
                 }
             }
             Button(onClick = onAdd, modifier = Modifier.fillMaxWidth().padding(top = 12.dp).heightIn(min = 50.dp), shape = RoundedCornerShape(16.dp)) {
-                Icon(Icons.Default.AddCircle, contentDescription = null)
+                Icon(LedgerIcons.Add, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text("记一笔", fontWeight = FontWeight.Bold)
             }
@@ -770,7 +752,7 @@ private fun OverviewPage(
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Row {
-                            Icon(Icons.Default.Savings, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
+                            Icon(LedgerIcons.Savings, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
                             Spacer(Modifier.width(7.dp))
                             Text("本月预算", fontWeight = FontWeight.SemiBold)
                         }
@@ -874,7 +856,7 @@ internal fun RecordPage(
                         account,
                         onAccount,
                         label = { Text("账户") },
-                        leadingIcon = { Icon(Icons.Default.AccountBalanceWallet, contentDescription = null) },
+                        leadingIcon = { Icon(LedgerIcons.Wallet, contentDescription = null) },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                     )
@@ -1002,7 +984,7 @@ internal fun FlowPage(
         value = query,
         onValueChange = { query = it.take(50) },
         placeholder = { Text("搜索分类、账户、备注或金额") },
-        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+        leadingIcon = { Icon(LedgerIcons.Search, contentDescription = null) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
         shape = RoundedCornerShape(18.dp),
@@ -1442,7 +1424,7 @@ internal fun CategoryTreeManagerDialog(
                             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                         ) {
                             Spacer(Modifier.width((item.depth * 18).dp))
-                            Icon(Icons.Default.DragIndicator, contentDescription = "拖动 ${node.name}", tint = MaterialTheme.colorScheme.secondary)
+                            Icon(LedgerIcons.Drag, contentDescription = "拖动 ${node.name}", tint = MaterialTheme.colorScheme.secondary)
                             Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
                                 Text(categoryNodePath(node.id, typed), fontWeight = if (focusedId == node.id) FontWeight.Bold else FontWeight.Normal)
                                 if (!node.isSystem) Row {
@@ -1454,7 +1436,7 @@ internal fun CategoryTreeManagerDialog(
                             val directCount = rows.count { it.categoryId == node.id }
                             if (directCount > 0) Text("$directCount 笔", style = MaterialTheme.typography.labelSmall)
                             if (!node.isSystem) IconButton(onClick = { pendingDelete = node }) {
-                                Icon(Icons.Default.Delete, contentDescription = "删除 ${node.name}", tint = MaterialTheme.colorScheme.error)
+                                Icon(LedgerIcons.Trash, contentDescription = "删除 ${node.name}", tint = MaterialTheme.colorScheme.error)
                             }
                         }
                     }
@@ -1528,7 +1510,7 @@ private fun SyncSettingsPage(
         item {
             Text("安全与同步", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
             Button(onClick = { managingCategories = true }, modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
-                Icon(Icons.Default.DragIndicator, contentDescription = null)
+                Icon(LedgerIcons.Drag, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text("分类管理 · 搜索与整理")
             }
@@ -1541,7 +1523,7 @@ private fun SyncSettingsPage(
             ) {
                 Column(modifier = Modifier.padding(18.dp)) {
                     Icon(
-                        if (status.configured) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                        if (status.configured) LedgerIcons.CloudDone else LedgerIcons.CloudQueue,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(32.dp),
@@ -1587,7 +1569,7 @@ private fun SyncSettingsPage(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
             ) {
-                Icon(Icons.Default.Sync, contentDescription = null)
+                Icon(LedgerIcons.Sync, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text(if (status.configured) "更新配置并同步" else "开启云端同步")
             }
