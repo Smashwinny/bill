@@ -4,7 +4,7 @@ import java.time.Instant
 import java.time.YearMonth
 import java.time.ZoneId
 
-internal enum class CityBuildingStyle { PLATFORM, HOUSE, PAVILION, TERRACE, DOME, PAGODA, PEARL }
+internal enum class CityBuildingStyle { TREE, HOUSE, PAVILION, TERRACE, DOME, PAGODA, PEARL }
 internal data class CityFloor(val transactionId: String, val category: String, val amountCents: Long)
 internal object CityCalendarModel {
     fun floors(rows: List<ManualTransactionEntity>, month: YearMonth,
@@ -18,7 +18,7 @@ internal object CityCalendarModel {
 
     // More transactions create a taller landmark. Stable date-based variants avoid random reshuffling.
     fun style(day: Int, count: Int): CityBuildingStyle = when {
-        count <= 2 -> CityBuildingStyle.PLATFORM
+        count <= 2 -> CityBuildingStyle.TREE
         count <= 4 -> if (day % 2 == 0) CityBuildingStyle.HOUSE else CityBuildingStyle.PAVILION
         count <= 7 -> if (day % 2 == 0) CityBuildingStyle.TERRACE else CityBuildingStyle.DOME
         count <= 11 -> CityBuildingStyle.PAGODA
@@ -31,8 +31,10 @@ internal object CityCalendarModel {
     fun marker(month: YearMonth, day: Int, count: Int, maxCount: Int): ScenePoint {
         val center = CalendarProjection.dayCenter(month, day)
         if (count == 0) return center.copy(y = center.y + .20f, z = .04f)
+        // Keep a small tree's canopy visible: put its date beside the tree, not on its tip.
+        if (count <= 2) return center.copy(y = center.y + .28f, z = .04f)
         val roof = when (style(day, count)) {
-            CityBuildingStyle.PLATFORM -> .035f
+            CityBuildingStyle.TREE -> 0f
             CityBuildingStyle.HOUSE -> .22f
             CityBuildingStyle.PAVILION -> .21f
             CityBuildingStyle.TERRACE -> .15f

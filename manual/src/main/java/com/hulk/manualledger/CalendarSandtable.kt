@@ -68,14 +68,14 @@ internal class CalendarProjection(val width: Float, val height: Float, yaw: Floa
     }
 }
 @Composable
-internal fun CalendarSandtable(month: YearMonth, days: Map<Int, List<CityFloor>>, onDay: (LocalDate) -> Unit) {
+internal fun CalendarSandtable(month: YearMonth, days: Map<Int, List<CityFloor>>, onDay: (LocalDate) -> Unit, selectedDay: Int? = null) {
     var yaw by remember { mutableStateOf(-22f) }
     var pitch by remember { mutableStateOf(52f) }
     var zoom by remember { mutableStateOf(1f) }
     val hitFaces = remember { java.util.concurrent.atomic.AtomicReference<List<Pair<List<ProjectedPoint>, Int>>>(emptyList()) }
     val latestOnDay by rememberUpdatedState(onDay)
     val today = LocalDate.now().takeIf { YearMonth.from(it) == month }?.dayOfMonth
-    val scene = remember(month, days, today) { buildCityScene(month, days, today) }
+    val scene = remember(month, days, today, selectedDay) { buildCityScene(month, days, selectedDay ?: today) }
     val maxCount = days.values.maxOfOrNull { it.size } ?: 1
     val primary = MaterialTheme.colorScheme.primary
     val weeks = (month.atDay(1).dayOfWeek.value - 1 + month.lengthOfMonth() + 6) / 7
@@ -88,7 +88,7 @@ internal fun CalendarSandtable(month: YearMonth, days: Map<Int, List<CityFloor>>
                 stateDescription = "旋转 ${yaw.toInt()} 度，俯角 ${pitch.toInt()} 度"
                 customActions = (1..month.lengthOfMonth()).map { day ->
                     val records = days[day].orEmpty()
-                    CustomAccessibilityAction("${day}日，${records.size} 笔，支出 ${AmountExpression.format(records.sumOf { it.amountCents })} 元，查看流水") {
+                    CustomAccessibilityAction("${day}日，${records.size} 笔，支出 ${AmountExpression.format(records.sumOf { it.amountCents })} 元，查看当天分类") {
                         latestOnDay(month.atDay(day)); true
                     }
                 }
@@ -120,9 +120,7 @@ internal fun CalendarSandtable(month: YearMonth, days: Map<Int, List<CityFloor>>
             val painted = ground + buildings
             painted.forEach { (face,points) ->
                 drawPath(path(points),face.color)
-                face.windows.forEach { pane ->
-                    drawPath(path(pane.map(camera::project)),Color(0xFFF9F1D3).copy(alpha=.84f))
-                }
+
             }
             val hits = painted.mapNotNull { (face,points) -> face.day?.let { points to it } }.toMutableList()
             val labels = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -145,10 +143,10 @@ internal fun CalendarSandtable(month: YearMonth, days: Map<Int, List<CityFloor>>
                 val clearance = android.graphics.RectF(rect).apply { inset(-1.dp.toPx(), -1.dp.toPx()) }
                 if (occupiedLabels.any { android.graphics.RectF.intersects(it, clearance) }) return@forEach
                 occupiedLabels += clearance
-                val ink=Paint(Paint.ANTI_ALIAS_FLAG).apply { color=(if(day==today) primary else Color(0xFFFFFEF7).copy(alpha=.94f)).toArgb() }
+                val ink=Paint(Paint.ANTI_ALIAS_FLAG).apply { color=(if(day==(selectedDay ?: today)) primary else Color(0xFFFFFEF7).copy(alpha=.94f)).toArgb() }
                 if (count > 0) drawLine(Color(0xFFFFFEF7),Offset(p.x,rect.bottom),Offset(p.x,rect.bottom+3.dp.toPx()),strokeWidth=1.dp.toPx())
                 drawContext.canvas.nativeCanvas.drawRoundRect(rect,3.dp.toPx(),3.dp.toPx(),ink)
-                labels.color=(if(day==today) Color.White else Color(0xFF364D46)).toArgb()
+                labels.color=(if(day==(selectedDay ?: today)) Color.White else Color(0xFF364D46)).toArgb()
                 drawContext.canvas.nativeCanvas.drawText(day.toString(),p.x,p.y-(labels.ascent()+labels.descent())/2,labels)
                 hits += listOf(ProjectedPoint(rect.left,rect.top,p.depth),ProjectedPoint(rect.right,rect.top,p.depth),
                     ProjectedPoint(rect.right,rect.bottom,p.depth),ProjectedPoint(rect.left,rect.bottom,p.depth)) to day

@@ -26,7 +26,7 @@ class CityCalendarTest {
         assertEquals(result,CityCalendarModel.floors(listOf(a,b,c).reversed(),month,{"当前分类 › ${it.category}"},zone))
     }
     @Test fun skylineUsesCountTiersAndStableDateVariants() {
-        assertEquals(CityBuildingStyle.PLATFORM,CityCalendarModel.style(1,2))
+        assertEquals(CityBuildingStyle.TREE,CityCalendarModel.style(1,2))
         assertEquals(CityBuildingStyle.PAVILION,CityCalendarModel.style(1,3))
         assertEquals(CityBuildingStyle.HOUSE,CityCalendarModel.style(2,4))
         assertEquals(CityBuildingStyle.DOME,CityCalendarModel.style(1,5))
@@ -48,5 +48,14 @@ class CityCalendarTest {
             assertTrue(face.corners.size>=3)
             face.corners.forEach { assertTrue(it.x.isFinite()&&it.y.isFinite()&&it.z.isFinite());assertTrue(it.z<=3f) }
         }
+    }
+
+    @Test fun emptyDaysHaveNoDecorativeBuildingsAndTreesHaveNoExtraPlatformOrRoof() {
+        assertTrue(buildCityScene(month, emptyMap(), null).buildings.isEmpty())
+        val floors = listOf(CityFloor("a", "饮食", 100), CityFloor("b", "交通", 200))
+        val scene = buildCityScene(month, mapOf(29 to floors), null)
+        assertEquals(setOf(29), scene.buildings.mapNotNull { it.day }.toSet())
+        assertEquals(CityBuildingStyle.TREE, CityCalendarModel.style(29, floors.size))
+        assertEquals(CityCalendarModel.top(2, 2), scene.buildings.flatMap { it.corners }.maxOf { it.z }, .0001f)
     }
 }

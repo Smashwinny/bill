@@ -144,6 +144,9 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
         }
     }
     val cityFloors = remember(month, expenses, resolveCategory) { CityCalendarModel.floors(expenses, month, resolveCategory) }
+    var selectedCityDay by remember(month) { mutableStateOf(
+        LocalDate.now().takeIf { YearMonth.from(it) == month }?.dayOfMonth
+            ?: cityFloors.keys.maxOrNull() ?: 1) }
     val maximum = dayGroups.values.maxOfOrNull { it.values.sum() }?.coerceAtLeast(1) ?: 1L
     val legend = remember(month, expenses, resolveCategory) { LedgerBrowsing.expenseFrequency(expenses, month, resolveCategory) }
     Card(Modifier.fillMaxWidth().padding(top = 16.dp), shape = RoundedCornerShape(24.dp),
@@ -159,7 +162,7 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
                     label = { Text(if (perspective) "3D 小城" else "平面") }, modifier = Modifier.testTag("calendar-perspective"))
             }
             if (perspective) {
-                CalendarSandtable(month, cityFloors, onDay)
+                CalendarSandtable(month, cityFloors, { selectedCityDay = it.dayOfMonth }, selectedCityDay)
             } else {
             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                 listOf("一", "二", "三", "四", "五", "六", "日").forEach { Text(it, Modifier.weight(1f), textAlign = TextAlign.Center,
@@ -214,8 +217,9 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
                 }
             }
             }
-            Text(if (perspective) "拖动旋转与俯仰 · 双指缩放 · 点日期看流水" else "点日期查看当天全部收支", style = MaterialTheme.typography.labelSmall,
+            Text(if (perspective) "拖动旋转 · 双指缩放 · 点建筑看当天分类" else "点日期查看当天全部收支", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(top = 10.dp))
+            if (perspective) DayCategoryPanel(month, cityFloors, selectedCityDay, { selectedCityDay = it }, onDay)
             if (legend.isEmpty()) Text("本月暂无支出", modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
             else {
                 Text("分类图例 · 按笔数", style = MaterialTheme.typography.labelSmall,
