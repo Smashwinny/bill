@@ -258,7 +258,12 @@ class MainActivity : ComponentActivity() {
         message = "正在保存到本地…"
         executor.execute {
             runCatching { repository.add(input) }
-                .onSuccess { ManualSyncScheduler.syncNow(this); refresh("已保存到本地；同步将在网络可用时后台进行") }
+                .onSuccess { inserted ->
+                    if (inserted && input.categoryId != null) getSharedPreferences("manual_entry", MODE_PRIVATE)
+                        .edit().putString("category_${input.type.name}", input.categoryId).apply()
+                    ManualSyncScheduler.syncNow(this)
+                    refresh("已保存到本地；同步将在网络可用时后台进行")
+                }
                 .onFailure { runOnUiThread { message = it.message ?: "保存失败" } }
         }
     }
@@ -477,7 +482,7 @@ private val RedLedgerColorScheme = LedgerColorScheme.copy(
 )
 
 @Composable
-private fun ManualLedgerScreen(
+internal fun ManualLedgerScreen(
     rows: List<ManualTransactionEntity>,
     categoryNodes: List<LedgerCategoryEntity>,
     pendingCount: Long,
@@ -514,17 +519,27 @@ private fun ManualLedgerScreen(
     var type by androidx.compose.runtime.remember { mutableStateOf(ManualTransactionType.EXPENSE) }
     var amount by androidx.compose.runtime.remember { mutableStateOf("") }
     var categoryId by remember { mutableStateOf<String?>(null) }
+    val entryPreferences = LocalContext.current.getSharedPreferences("manual_entry", android.content.Context.MODE_PRIVATE)
     val category = CategoryTree.path(categoryId, categoryNodes)
-    androidx.compose.runtime.LaunchedEffect(type, categoryNodes) {
+    androidx.compose.runtime.LaunchedEffect(type, categoryNodes, rows) {
         if (CategoryTree.selectable(type, categoryNodes).none { it.id == categoryId }) {
-            categoryId = CategoryTree.selectable(type, categoryNodes).firstOrNull()?.id
+            categoryId = LedgerBrowsing.defaultCategory(type, categoryNodes, rows,
+                entryPreferences.getString("category_${type.name}", null))
         }
     }
     var account by androidx.compose.runtime.remember { mutableStateOf("现金") }
     var note by androidx.compose.runtime.remember { mutableStateOf("") }
     var occurredAtMs by androidx.compose.runtime.remember { mutableStateOf(System.currentTimeMillis()) }
     var month by androidx.compose.runtime.remember { mutableStateOf(YearMonth.now()) }
-    val monthRows = rows.filter { YearMonth.from(Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault())) == month }
+    var selectedDay by remember { mutableStateOf<LocalDate?>(null) }
+    var allDates by remember { mutableStateOf(false) }
+    fun openDay(day: LocalDate) {
+        month = YearMonth.from(day)
+        selectedDay = day
+        allDates = false
+        page = LedgerPage.FLOW
+    }
+    val monthRows = LedgerBrowsing.filter(rows, month, null)
     val expense = monthRows.filter { it.type == ManualTransactionType.EXPENSE }.sumOf { it.amountCents }
     val income = monthRows.filter { it.type == ManualTransactionType.INCOME }.sumOf { it.amountCents }
     val previousMonth = month.minusMonths(1)
@@ -575,6 +590,13 @@ private fun ManualLedgerScreen(
                 .padding(horizontal = 18.dp, vertical = 12.dp),
         ) {
             LedgerHeader(pendingCount = pendingCount, cloudConfigured = syncStatus.configured, message = message)
+            if (page != LedgerPage.RECORD && page != LedgerPage.SETTINGS) {
+                DateScopeBar(month, if (page == LedgerPage.FLOW) selectedDay else null,
+                    allDates && page == LedgerPage.FLOW,
+                    onMonth = { month = it; selectedDay = null; allDates = false },
+                    onDay = ::openDay,
+                    onAll = if (page == LedgerPage.FLOW) ({ allDates = true; selectedDay = null }) else null)
+            }
             when (page) {
             LedgerPage.OVERVIEW -> OverviewPage(
                 month = month,
@@ -584,8 +606,9 @@ private fun ManualLedgerScreen(
                 expense = expense,
                 monthlyBudgetCents = monthlyBudgetCents,
                 onAdd = { page = LedgerPage.RECORD },
-                onAllFlows = { page = LedgerPage.FLOW },
+                onAllFlows = { selectedDay = null; allDates = false; page = LedgerPage.FLOW },
                 onAnalysis = { page = LedgerPage.ANALYSIS },
+                onDay = ::openDay,
                 resolveCategory = ::resolveCategory,
                 onChangeTransactionCategory = onChangeTransactionCategory,
             )
@@ -598,8 +621,8 @@ private fun ManualLedgerScreen(
                 occurredAtMs = occurredAtMs,
                 categoryNodes = categoryNodes,
                 selectedCategoryId = categoryId,
-                onType = { type = it; categoryId = null },
-                onAmount = { amount = it.take(14) },
+                onType = { if (type != it) { type = it; categoryId = null } },
+                onAmount = { amount = it.take(120) },
                 onCategory = { categoryId = it },
                 onAccount = { account = it.take(40) },
                 onNote = { note = it.take(200) },
@@ -607,7 +630,7 @@ private fun ManualLedgerScreen(
                 onSave = {
                     onSave(NewManualTransaction(
                         type = type,
-                        amountText = amount,
+                        amountText = AmountExpression.normalized(amount) ?: return@RecordPage,
                         category = category,
                         categoryId = categoryId,
                         account = account,
@@ -616,14 +639,17 @@ private fun ManualLedgerScreen(
                     ))
                     amount = ""
                     note = ""
+                    openDay(Instant.ofEpochMilli(occurredAtMs).atZone(ZoneId.systemDefault()).toLocalDate())
                     occurredAtMs = System.currentTimeMillis()
-                    page = LedgerPage.FLOW
                 },
             )
             LedgerPage.FLOW -> FlowPage(
                 rows, categoryNodes, onImport, onExport, onDirectMigration, onDelete,
                 trashRows, onRestore, onEmptyTrash, onEdit,
                 onChangeTransactionCategory,
+                filterMonth = if (allDates) null else month,
+                filterDay = selectedDay,
+                onRevealDate = ::openDay,
             )
             LedgerPage.ANALYSIS -> AnalysisPage(
                 month = month,
@@ -633,8 +659,7 @@ private fun ManualLedgerScreen(
                 previousExpense = previousExpense,
                 monthlyBudgetCents = monthlyBudgetCents,
                 onBudgetChange = onBudgetChange,
-                onPreviousMonth = { month = month.minusMonths(1) },
-                onNextMonth = { if (month < YearMonth.now()) month = month.plusMonths(1) },
+                onDay = ::openDay,
                 resolveCategory = ::resolveCategory,
             )
             LedgerPage.SETTINGS -> SyncSettingsPage(
@@ -695,6 +720,7 @@ private fun OverviewPage(
     onAdd: () -> Unit,
     onAllFlows: () -> Unit,
     onAnalysis: () -> Unit,
+    onDay: (LocalDate) -> Unit,
     resolveCategory: (ManualTransactionEntity) -> String,
     onChangeTransactionCategory: (String, String) -> Unit,
 ) {
@@ -722,7 +748,9 @@ private fun OverviewPage(
                 shape = RoundedCornerShape(26.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Column(modifier = Modifier.padding(22.dp)) {
+                Column(modifier = Modifier.fillMaxWidth().background(
+                    androidx.compose.ui.graphics.Brush.linearGradient(listOf(Color(0xFF202C46), Color(0xFF465777))))
+                    .padding(22.dp)) {
                     Text("${month.monthValue} 月结余", color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f), style = MaterialTheme.typography.labelLarge)
                     Text(money(balance), color = Color.White, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
                     Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -736,6 +764,9 @@ private fun OverviewPage(
                 Spacer(Modifier.width(8.dp))
                 Text("记一笔", fontWeight = FontWeight.Bold)
             }
+        }
+        item {
+            SpendingCalendar(month, rows, resolveCategory, onDay)
         }
         if (monthlyBudgetCents > 0) item {
             val used = (expense.toFloat() / monthlyBudgetCents).coerceIn(0f, 1f)
@@ -833,7 +864,7 @@ private fun EmptyHint(text: String) {
 }
 
 @Composable
-private fun RecordPage(
+internal fun RecordPage(
     type: ManualTransactionType,
     amount: String,
     category: String,
@@ -874,16 +905,7 @@ private fun RecordPage(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("金额", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
-                    OutlinedTextField(
-                        amount,
-                        onAmount,
-                        prefix = { Text("¥ ", style = MaterialTheme.typography.headlineSmall) },
-                        textStyle = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
-                        placeholder = { Text("0.00") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
-                    )
+                    AmountField(amount, onAmount)
                     Text("消费分类", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 14.dp))
                     TextButton(onClick = { choosingCategory = true }) {
                         Text(category.ifBlank { "请选择分类" })
@@ -902,7 +924,7 @@ private fun RecordPage(
             }
             Button(
                 onClick = onSave,
-                enabled = ManualLedgerRepository.parseCents(amount) != null && category.isNotBlank() && account.isNotBlank(),
+                enabled = AmountExpression.normalized(amount) != null && category.isNotBlank() && account.isNotBlank(),
                 modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
                 shape = RoundedCornerShape(16.dp),
             ) { Text("保存到本机", fontWeight = FontWeight.Bold) }
@@ -924,6 +946,9 @@ internal fun FlowPage(
     onEmptyTrash: (List<String>) -> Unit,
     onEdit: (String, NewManualTransaction) -> Unit,
     onChangeTransactionCategory: (String, String) -> Unit,
+    filterMonth: YearMonth? = null,
+    filterDay: LocalDate? = null,
+    onRevealDate: (LocalDate) -> Unit = {},
 ) {
     var showingTrash by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<ManualTransactionEntity?>(null) }
@@ -981,7 +1006,8 @@ internal fun FlowPage(
 
     var editing by androidx.compose.runtime.remember { mutableStateOf<ManualTransactionEntity?>(null) }
     var changingCategory by androidx.compose.runtime.remember { mutableStateOf<ManualTransactionEntity?>(null) }
-    val visibleRows = rows.filter { row ->
+    val datedRows = LedgerBrowsing.filter(rows, filterMonth, filterDay)
+    val visibleRows = datedRows.filter { row ->
         query.isBlank() || listOf(row.category, row.account, row.note.orEmpty(), money(row.amountCents))
             .any { it.contains(query.trim(), ignoreCase = true) }
     }
@@ -990,7 +1016,11 @@ internal fun FlowPage(
             row = row,
             categoryNodes = categoryNodes,
             onDismiss = { editing = null },
-            onSave = { input -> lastChangedId = row.id; query = ""; onEdit(row.id, input); editing = null },
+            onSave = { input ->
+                lastChangedId = row.id; query = ""
+                onRevealDate(Instant.ofEpochMilli(input.occurredAtMs).atZone(ZoneId.systemDefault()).toLocalDate())
+                onEdit(row.id, input); editing = null
+            },
         )
     }
     changingCategory?.let { row ->
@@ -1002,7 +1032,7 @@ internal fun FlowPage(
             onSelect = { categoryId -> lastChangedId = row.id; query = ""; onChangeTransactionCategory(row.id, categoryId); changingCategory = null },
         )
     }
-    Text("全部流水", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
+    Text(when { filterDay != null -> "$filterDay 的流水"; filterMonth != null -> "$filterMonth 的流水"; else -> "全部流水" }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         TextButton(onClick = onImport, modifier = Modifier.weight(1f)) { Text("导入随手记") }
         TextButton(onClick = onExport, modifier = Modifier.weight(1f)) { Text("导出流水与分类") }
@@ -1018,10 +1048,13 @@ internal fun FlowPage(
         shape = RoundedCornerShape(18.dp),
     )
     lastChangedId?.let { id ->
-        rows.firstOrNull { it.id == id }?.let { row ->
+        visibleRows.firstOrNull { it.id == id }?.let { row ->
             Text("已定位流水：${row.category} · ${money(row.amountCents)}", color = MaterialTheme.colorScheme.primary)
         }
     }
+    Text("${visibleRows.size} 笔 · 支出 ${money(visibleRows.filter { it.type == ManualTransactionType.EXPENSE }.sumOf { it.amountCents })} · 收入 ${money(visibleRows.filter { it.type == ManualTransactionType.INCOME }.sumOf { it.amountCents })}",
+        style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
+    androidx.compose.runtime.LaunchedEffect(filterMonth, filterDay) { query = ""; listState.scrollToItem(0) }
     androidx.compose.runtime.LaunchedEffect(rows, lastChangedId, query) {
         val index = visibleRows.indexOfFirst { it.id == lastChangedId }
         if (index >= 0) listState.scrollToItem(index)
@@ -1029,8 +1062,8 @@ internal fun FlowPage(
     if (rows.isEmpty()) {
         Text("还没有流水，去“记一笔”添加第一条吧。", modifier = Modifier.padding(top = 24.dp))
     } else if (visibleRows.isEmpty()) {
-        Text("没有匹配“$query”的流水", modifier = Modifier.padding(top = 24.dp))
-    } else LazyColumn(state = listState, modifier = Modifier.fillMaxWidth()) {
+        Text(if (query.isBlank()) "这个日期范围没有流水，可切换日期或查看全部" else "当前日期范围没有匹配“$query”的流水", modifier = Modifier.padding(top = 24.dp))
+    } else LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().testTag("flow-list")) {
         items(visibleRows, key = { it.id }) { row ->
             TransactionRow(
                 row,
@@ -1127,7 +1160,7 @@ private fun EditTransactionDialog(
                     TextButton(
                         onClick = {
                             type = option
-                            selectedCategoryId = CategoryTree.selectable(option, categoryNodes).firstOrNull()?.id
+                            selectedCategoryId = null
                             category = CategoryTree.path(selectedCategoryId, categoryNodes)
                             choosingType = false
                         },
@@ -1167,7 +1200,7 @@ private fun EditTransactionDialog(
                         Text("${typeLabel(type)}  ›", fontWeight = FontWeight.SemiBold)
                     }
                 }
-                OutlinedTextField(amount, { amount = it.take(14) }, label = { Text("金额") }, singleLine = true)
+                AmountField(amount, { amount = it.take(120) })
                 TextButton(onClick = { choosingCategory = true }, modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Text("分类", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
@@ -1182,11 +1215,11 @@ private fun EditTransactionDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = ManualLedgerRepository.parseCents(amount) != null && category.isNotBlank() && account.isNotBlank(),
+                enabled = AmountExpression.normalized(amount) != null && category.isNotBlank() && account.isNotBlank(),
                 onClick = {
                     onSave(NewManualTransaction(
                         type = type,
-                        amountText = amount,
+                        amountText = AmountExpression.normalized(amount) ?: return@TextButton,
                         category = category,
                         categoryId = selectedCategoryId,
                         account = account,
@@ -1215,78 +1248,6 @@ private fun TransactionDateButton(valueMs: Long, onValueChange: (Long) -> Unit) 
             ).show()
         },
     ) { Text("日期：${date.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))}  ›") }
-}
-
-@Composable
-private fun LeafCategoryDialog(
-    type: ManualTransactionType,
-    categories: List<LedgerCategoryEntity>,
-    selectedId: String?,
-    onDismiss: () -> Unit,
-    onSelect: (String) -> Unit,
-) {
-    val typed = categories.filter { it.type == type }
-    val byId = typed.associateBy { it.id }
-    val roots = typed.filter { it.parentId == null }.sortedWith(compareBy<LedgerCategoryEntity> { it.sortOrder }.thenBy { it.name })
-    val parentIds = typed.mapNotNull { it.parentId }.toSet()
-    val leaves = typed.filter { it.id !in parentIds }.sortedBy { categoryNodePath(it.id, typed) }
-    fun rootId(id: String?): String? {
-        var node = id?.let(byId::get) ?: return null
-        val seen = mutableSetOf<String>()
-        while (node.parentId != null && seen.add(node.id)) node = byId[node.parentId] ?: break
-        return node.id
-    }
-    var selectedRootId by remember(type, selectedId, categories) {
-        mutableStateOf(rootId(selectedId) ?: roots.firstOrNull()?.id)
-    }
-    var query by remember { mutableStateOf("") }
-    val visibleLeaves = leaves.filter {
-        if (query.isBlank()) rootId(it.id) == selectedRootId
-        else categoryNodePath(it.id, typed).contains(query.trim(), ignoreCase = true)
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("更改账单分类") },
-        text = {
-            LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                item {
-                    OutlinedTextField(query, { query = it }, label = { Text("搜索完整分类路径") }, singleLine = true)
-                    Text("一级分类", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
-                    roots.chunked(2).forEach { row ->
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            row.forEach { root ->
-                                FilterChip(
-                                    selected = root.id == selectedRootId,
-                                    onClick = { selectedRootId = root.id },
-                                    label = { Text(root.name, maxLines = 2) },
-                                    modifier = Modifier.weight(1f),
-                                )
-                            }
-                            repeat(2 - row.size) { Spacer(Modifier.weight(1f)) }
-                        }
-                    }
-                    Text(
-                        "完整分类路径 · ${roots.firstOrNull { it.id == selectedRootId }?.name.orEmpty()}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
-                items(visibleLeaves, key = { it.id }) { node ->
-                    FilterChip(
-                        selected = node.id == selectedId,
-                        onClick = { onSelect(node.id) },
-                        label = { Text(categoryNodePath(node.id, typed)) },
-                        modifier = Modifier.fillMaxWidth().testTag("category-option-${node.id}"),
-                    )
-                }
-                if (visibleLeaves.isEmpty()) item { EmptyHint("这个一级分类下还没有可用的二级分类，请先到设置中添加") }
-            }
-        },
-        confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
 }
 
 private data class CategoryTreeRow(val node: LedgerCategoryEntity, val depth: Int)
@@ -1690,8 +1651,7 @@ private fun AnalysisPage(
     previousExpense: Long,
     monthlyBudgetCents: Long,
     onBudgetChange: (String) -> Unit,
-    onPreviousMonth: () -> Unit,
-    onNextMonth: () -> Unit,
+    onDay: (LocalDate) -> Unit,
     resolveCategory: (ManualTransactionEntity) -> String,
 ) {
     val expenses = rows.filter { it.type == ManualTransactionType.EXPENSE }
@@ -1716,11 +1676,6 @@ private fun AnalysisPage(
     var analysisView by remember(month) { mutableStateOf(AnalysisView.TREND) }
     LazyColumn(modifier = Modifier.fillMaxWidth()) {
         item {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                TextButton(onClick = onPreviousMonth) { Text("‹ 上月") }
-                Text("${month.year} 年 ${month.monthValue} 月", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
-                TextButton(onClick = onNextMonth, enabled = month < YearMonth.now()) { Text("下月 ›") }
-            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SummaryCard("本月收入", money(income), Modifier.weight(1f))
                 SummaryCard("本月支出", money(expense), Modifier.weight(1f))
@@ -1767,9 +1722,9 @@ private fun AnalysisPage(
             }
             peak?.let { Text("${it.label} 共 ${it.count} 笔，合计 ${money(it.amountCents)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(top = 6.dp)) }
             Text("每日消费日历", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
-            SpendingCalendar(month, dailySpending, expenses)
+            SpendingCalendar(month, rows, resolveCategory, onDay)
             Text("每日消费柱状图", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
-            DailySpendingBarChart(month, dailySpending)
+            DailySpendingBarChart(month, dailySpending, onDay)
             }
             if (analysisView == AnalysisView.CATEGORY) {
             Text("分类占比", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
@@ -1813,82 +1768,14 @@ private enum class AnalysisView(val label: String) {
 
 
 @Composable
-private fun SpendingCalendar(
-    month: YearMonth,
-    daily: List<LedgerInsights.DailySpend>,
-    expenses: List<ManualTransactionEntity>,
-) {
-    var selectedDay by remember(month) { mutableStateOf<LedgerInsights.DailySpend?>(null) }
-    selectedDay?.let { day ->
-        AlertDialog(
-            onDismissRequest = { selectedDay = null },
-            title = { Text("${month.year} 年 ${month.monthValue} 月 ${day.dayOfMonth} 日") },
-            text = {
-                val dayRows = expenses.filter {
-                    Instant.ofEpochMilli(it.occurredAtMs).atZone(ZoneId.systemDefault()).dayOfMonth == day.dayOfMonth
-                }.sortedByDescending { it.amountCents }
-                Column {
-                    Text("当日支出：${money(day.amountCents)} · ${dayRows.size} 笔")
-                    dayRows.take(5).forEach { Text("${it.category}  ${money(it.amountCents)}", modifier = Modifier.padding(top = 6.dp)) }
-                    if (dayRows.size > 5) Text("还有 ${dayRows.size - 5} 笔，可到流水页查看", style = MaterialTheme.typography.bodySmall)
-                }
-            },
-            confirmButton = { TextButton(onClick = { selectedDay = null }) { Text("知道了") } },
-        )
-    }
-    val firstOffset = month.atDay(1).dayOfWeek.value - 1
-    val maximum = daily.maxOfOrNull { it.amountCents }?.coerceAtLeast(1L) ?: 1L
-    val cells: List<LedgerInsights.DailySpend?> = List(firstOffset) { null } + daily
-    Column {
-        Row(modifier = Modifier.fillMaxWidth()) {
-            listOf("一", "二", "三", "四", "五", "六", "日").forEach { label ->
-                Text(label, modifier = Modifier.weight(1f), textAlign = TextAlign.Center, style = MaterialTheme.typography.labelSmall)
-            }
-        }
-        cells.chunked(7).forEach { week ->
-            Row(modifier = Modifier.fillMaxWidth()) {
-                week.forEach { day ->
-                    val intensity = day?.amountCents?.toFloat()?.div(maximum)?.coerceIn(0f, 1f) ?: 0f
-                    Surface(
-                        modifier = Modifier.weight(1f).padding(2.dp)
-                            .then(if (day != null) Modifier.clickable { selectedDay = day } else Modifier),
-                        shape = RoundedCornerShape(8.dp),
-                        color = if (day == null) Color.Transparent else MaterialTheme.colorScheme.primary.copy(alpha = 0.07f + intensity * 0.45f),
-                    ) {
-                        Column(modifier = Modifier.padding(vertical = 6.dp), horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
-                            Text(day?.dayOfMonth?.toString().orEmpty(), style = MaterialTheme.typography.labelMedium)
-                            Text(
-                                day?.let { calendarCellAmount(it.amountCents) }.orEmpty(),
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                            )
-                        }
-                    }
-                }
-                repeat(7 - week.size) { Spacer(Modifier.weight(1f)) }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DailySpendingBarChart(month: YearMonth, daily: List<LedgerInsights.DailySpend>) {
-    var selected by remember(month) { mutableStateOf<LedgerInsights.DailySpend?>(null) }
-    selected?.let { day ->
-        AlertDialog(
-            onDismissRequest = { selected = null },
-            title = { Text("${month.monthValue} 月 ${day.dayOfMonth} 日") },
-            text = { Text("当天支出 ${money(day.amountCents)}。点击日历中的同一天可查看账单明细。") },
-            confirmButton = { TextButton(onClick = { selected = null }) { Text("知道了") } },
-        )
-    }
+private fun DailySpendingBarChart(month: YearMonth, daily: List<LedgerInsights.DailySpend>, onDay: (LocalDate) -> Unit) {
     val maximum = daily.maxOfOrNull { it.amountCents }?.coerceAtLeast(1L) ?: 1L
     val barColor = MaterialTheme.colorScheme.primary
-    Canvas(modifier = Modifier.fillMaxWidth().height(170.dp).pointerInput(daily) {
+    Canvas(modifier = Modifier.fillMaxWidth().height(170.dp).pointerInput(month, daily, onDay) {
         detectTapGestures { offset ->
             if (daily.isNotEmpty()) {
                 val index = (offset.x / (size.width / daily.size)).toInt().coerceIn(0, daily.lastIndex)
-                selected = daily[index]
+                onDay(month.atDay(daily[index].dayOfMonth))
             }
         }
     }) {
@@ -1963,13 +1850,7 @@ private fun SummaryCard(label: String, value: String, modifier: Modifier = Modif
     }
 }
 
-private fun categoryColor(category: String): Color {
-    val palette = listOf(
-        Color(0xFF0B705F), Color(0xFFE18A26), Color(0xFF4D6FC4), Color(0xFF9A5CB4),
-        Color(0xFFCC5A71), Color(0xFF4A8B8A), Color(0xFF8B6A45), Color(0xFF65736D),
-    )
-    return palette[(category.hashCode() and Int.MAX_VALUE) % palette.size]
-}
+private fun categoryColor(category: String): Color = ledgerCategoryColor(category.substringBefore(CategoryCatalog.HIERARCHY_SEPARATOR))
 
 private val timeFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 private fun formatTime(ms: Long): String = Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).format(timeFormat)
