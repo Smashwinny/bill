@@ -24,7 +24,7 @@ import java.time.ZoneId
 
 class CalendarPresentationTest {
     @get:Rule val compose = createComposeRule()
-    @Test fun cityCalendarRotatesAndSelectsVisibleDatePlaquesWithFlatFallback() {
+    @Test fun cityCalendarRotatesAndSelectsGroundDatesWithFlatFallback() {
         val names = listOf("饮食", "交通", "购物", "居家")
         val rows = (1..28).flatMap { day ->
             val count = listOf(1,2,3,4,5,7,8,10,12,16,0,2)[(day-1)%12]
@@ -45,6 +45,7 @@ class CalendarPresentationTest {
                 compose.onRoot().captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it)
             }
         }
+        compose.onNodeWithText("一日一栋 · 彩色一层一笔").assertDoesNotExist()
         capture("calendar-3d.png")
         val scene = compose.onNodeWithTag("calendar-sandtable")
         val original = scene.fetchSemanticsNode().config[SemanticsProperties.StateDescription]
@@ -55,7 +56,7 @@ class CalendarPresentationTest {
         assertEquals(original, scene.fetchSemanticsNode().config[SemanticsProperties.StateDescription])
         val bounds = scene.fetchSemanticsNode().boundsInRoot
         val point = CalendarProjection(bounds.width, bounds.height, -22f, 52f, 1f)
-            .project(CityCalendarModel.marker(YearMonth.of(2026, 2), 27, 3, 16))
+            .project(CityCalendarModel.marker(YearMonth.of(2026, 2), 27))
         scene.performTouchInput { click(Offset(point.x,point.y)) }
         compose.runOnIdle { assertEquals(null, selected) }
         compose.onNodeWithTag("day-category-title").performScrollTo().assertTextEquals("2月27日 · 当天分类")

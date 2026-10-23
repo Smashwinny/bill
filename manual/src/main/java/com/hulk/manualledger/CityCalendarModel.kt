@@ -16,32 +16,35 @@ internal object CityCalendarModel {
             .groupBy { Instant.ofEpochMilli(it.occurredAtMs).atZone(zone).dayOfMonth }
             .mapValues { (_, records) -> records.map { CityFloor(it.id, resolveCategory(it), it.amountCents) } }
 
-    // More transactions create a taller landmark. Stable date-based variants avoid random reshuffling.
-    fun style(day: Int, count: Int): CityBuildingStyle = when {
-        count <= 2 -> CityBuildingStyle.TREE
-        count <= 4 -> if (day % 2 == 0) CityBuildingStyle.HOUSE else CityBuildingStyle.PAVILION
-        count <= 7 -> if (day % 2 == 0) CityBuildingStyle.TERRACE else CityBuildingStyle.DOME
-        count <= 11 -> CityBuildingStyle.PAGODA
+    // One linear scale for the whole month; no per-day normalization or minimum floor height.
+    const val MAX_HEIGHT = 2.5f
+    const val GROUND_Z = .02f
+    fun total(floors: List<CityFloor>): Double = floors.sumOf { it.amountCents.coerceAtLeast(0).toDouble() }
+    fun height(amountCents: Double, maximumDailyCents: Double): Float =
+        if (maximumDailyCents > 0) (MAX_HEIGHT * amountCents / maximumDailyCents).toFloat() else 0f
+
+    fun layers(floors: List<CityFloor>, maximumDailyCents: Double): List<CityLayer> {
+        var amount = 0.0
+        return floors.map { floor ->
+            val bottom = height(amount, maximumDailyCents)
+            amount += floor.amountCents.coerceAtLeast(0)
+            CityLayer(floor, bottom, height(amount, maximumDailyCents))
+        }
+    }
+
+    // Silhouettes follow monetary height, with stable date-based variants at the same scale.
+    fun style(day: Int, height: Float): CityBuildingStyle = when {
+        height <= .38f -> CityBuildingStyle.TREE
+        height <= .8f -> if (day % 2 == 0) CityBuildingStyle.HOUSE else CityBuildingStyle.PAVILION
+        height <= 1.25f -> if (day % 2 == 0) CityBuildingStyle.TERRACE else CityBuildingStyle.DOME
+        height <= 1.9f -> CityBuildingStyle.PAGODA
         else -> CityBuildingStyle.PEARL
     }
 
-    fun floorHeight(maxCount: Int): Float = minOf(.22f, 2.5f / maxCount.coerceAtLeast(1))
-    fun top(count: Int, maxCount: Int): Float = .08f + count * floorHeight(maxCount)
-
-    fun marker(month: YearMonth, day: Int, count: Int, maxCount: Int): ScenePoint {
+    fun marker(month: YearMonth, day: Int): ScenePoint {
         val center = CalendarProjection.dayCenter(month, day)
-        if (count == 0) return center.copy(y = center.y + .20f, z = .04f)
-        // Keep a small tree's canopy visible: put its date beside the tree, not on its tip.
-        if (count <= 2) return center.copy(y = center.y + .28f, z = .04f)
-        val roof = when (style(day, count)) {
-            CityBuildingStyle.TREE -> 0f
-            CityBuildingStyle.HOUSE -> .22f
-            CityBuildingStyle.PAVILION -> .21f
-            CityBuildingStyle.TERRACE -> .15f
-            CityBuildingStyle.DOME -> .23f
-            CityBuildingStyle.PAGODA -> .30f
-            CityBuildingStyle.PEARL -> .34f
-        }
-        return center.copy(y = center.y - .08f, z = top(count, maxCount) + roof + .08f)
+        return center.copy(x = center.x + .24f, y = center.y + .25f, z = .025f)
     }
 }
+
+internal data class CityLayer(val floor: CityFloor, val bottom: Float, val top: Float)

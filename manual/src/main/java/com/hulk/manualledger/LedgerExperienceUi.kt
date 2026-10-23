@@ -156,7 +156,6 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
                     Text("消费日历", style = MaterialTheme.typography.titleMedium)
-                    Text(if (perspective) "一日一栋 · 彩色一层一笔" else "高度看金额 · 颜色看分类", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                 }
                 FilterChip(selected = perspective, onClick = { perspective = !perspective },
                     label = { Text(if (perspective) "3D 小城" else "平面") }, modifier = Modifier.testTag("calendar-perspective"))
@@ -217,8 +216,6 @@ internal fun SpendingCalendar(month: YearMonth, rows: List<ManualTransactionEnti
                 }
             }
             }
-            Text(if (perspective) "拖动旋转 · 双指缩放 · 点建筑看当天分类" else "点日期查看当天全部收支", style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(top = 10.dp))
             if (perspective) DayCategoryPanel(month, cityFloors, selectedCityDay, { selectedCityDay = it }, onDay)
             if (legend.isEmpty()) Text("本月暂无支出", modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
             else {

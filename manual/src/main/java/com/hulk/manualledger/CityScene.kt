@@ -14,8 +14,7 @@ internal fun buildCityScene(month: YearMonth, days: Map<Int, List<CityFloor>>, t
     val ground = mutableListOf<CityFace>()
     val buildings = mutableListOf<CityFace>()
     val stone = Color(0xFFE7DECC)
-    val maxCount = days.values.maxOfOrNull { it.size } ?: 1
-    val floorHeight = CityCalendarModel.floorHeight(maxCount)
+    val maximumDailyCents = days.values.maxOfOrNull(CityCalendarModel::total) ?: 0.0
 
     fun quad(target: MutableList<CityFace>, points: List<ScenePoint>, color: Color, day: Int? = null) {
         target += CityFace(points, color, day)
@@ -35,8 +34,6 @@ internal fun buildCityScene(month: YearMonth, days: Map<Int, List<CityFloor>>, t
         }
         quad(target, top, lerp(color, Color.White, .04f), day)
     }
-    fun block(target: MutableList<CityFace>, x: Float,y: Float,z0: Float,z1: Float,half: Float,color: Color,day: Int?) =
-        prism(target,x,y,z0,z1,half*sqrt(2f),half*sqrt(2f),4,color,day)
     // Separate foundation draw pass avoids a large top face hiding the far part of the map.
     val x0=-3.6f; val x1=3.6f; val y0=-weeks/2f-.1f;val y1=weeks/2f+.1f
     quad(ground,listOf(ScenePoint(x0,y0,-.22f),ScenePoint(x1,y0,-.22f),ScenePoint(x1,y0,0f),ScenePoint(x0,y0,0f)),Color(0xFFAAB4A4))
@@ -69,78 +66,67 @@ internal fun buildCityScene(month: YearMonth, days: Map<Int, List<CityFloor>>, t
         if(day==null) return@repeat
         val floors=days[day].orEmpty()
         if(floors.isEmpty()) return@repeat
-        val style=CityCalendarModel.style(day,floors.size)
-        val cx=x;val cy=y-.08f
-        val top=CityCalendarModel.top(floors.size,maxCount)
-        val roof = ledgerCategoryColor(floors.last().category)
-        if (style == CityBuildingStyle.TREE) {
-            prism(buildings,cx,cy,.02f,.08f,.022f,.022f,6,Color(0xFF92795B),day)
+        val totalHeight = CityCalendarModel.height(CityCalendarModel.total(floors), maximumDailyCents)
+        if (totalHeight <= 0f) return@repeat
+        val style = CityCalendarModel.style(day, totalHeight)
+        val cx = x; val cy = y - .08f
+        val profile = buildingProfile(style)
+        val sides = when (style) {
+            CityBuildingStyle.HOUSE, CityBuildingStyle.PAVILION, CityBuildingStyle.TERRACE -> 4
+            CityBuildingStyle.PAGODA -> 6
+            else -> 12
         }
-        // One uninterrupted color per transaction; roofs inherit the top floor category.
-        floors.forEachIndexed { index,floor ->
-            val z0=.08f+index*floorHeight;val z1=z0+floorHeight
-            val color=ledgerCategoryColor(floor.category)
-            when(style) {
-                CityBuildingStyle.TREE -> {
-                    val radius = .13f - index * .02f
-                    prism(buildings,cx,cy,z0,z1,radius,0f,8,color,day)
+        // Intersect the entire silhouette (including roofs and spires) with monetary layers.
+        // Every category occupies exactly its amount's vertical interval, regardless of shape.
+        CityCalendarModel.layers(floors, maximumDailyCents).forEach { layer ->
+            if (layer.top <= layer.bottom) return@forEach
+            val color = ledgerCategoryColor(layer.floor.category)
+            profile.zipWithNext().forEach { (a, b) ->
+                val lower = maxOf(layer.bottom, a.first * totalHeight)
+                val upper = minOf(layer.top, b.first * totalHeight)
+                if (upper > lower) {
+                    fun radius(z: Float): Float {
+                        val fraction = (z / totalHeight - a.first) / (b.first - a.first)
+                        return a.second + (b.second - a.second) * fraction.coerceIn(0f, 1f)
+                    }
+                    prism(buildings, cx, cy, CityCalendarModel.GROUND_Z + lower,
+                        CityCalendarModel.GROUND_Z + upper, radius(lower), radius(upper), sides, color, day)
                 }
-                CityBuildingStyle.PEARL -> {
-                    fun radius(t:Float)=.075f+.19f*max(exp(-((t-.28f)/.15f).pow(2)),exp(-((t-.76f)/.11f).pow(2)))
-                    prism(buildings,cx,cy,z0,z1,radius(index.toFloat()/floors.size),radius((index+1f)/floors.size),12,color,day)
-                }
-                CityBuildingStyle.PAGODA -> {
-                    val r=.30f-.10f*index/floors.size
-                    prism(buildings,cx,cy,z0,z1,r*.78f,r*.78f,6,color,day)
-                    // Each swept eave uses the same category color as its floor.
-                    prism(buildings,cx,cy,z1-minOf(.035f,floorHeight*.16f),z1,r,r*.70f,6,color,day)
-                }
-                CityBuildingStyle.DOME -> prism(buildings,cx,cy,z0,z1,.25f,.25f,12,color,day)
-                CityBuildingStyle.TERRACE -> {
-                    val half=.24f-.075f*(index/floors.size.toFloat())
-                    prism(buildings,cx+(index/floors.size.toFloat())*.045f,cy,z0,z1,half*sqrt(2f),half*sqrt(2f),4,color,day)
-                }
-                else -> prism(buildings,cx,cy,z0,z1,.30f,.30f,4,color,day)
-            }
-            // Floor seams remain visible even for consecutive purchases in the same category.
-            if(floorHeight>.025f && style!=CityBuildingStyle.PEARL && style!=CityBuildingStyle.PAGODA && style!=CityBuildingStyle.TREE) {
-                val radius=when(style) { CityBuildingStyle.DOME -> .254f;CityBuildingStyle.TERRACE -> (.24f-.075f*index/floors.size)*sqrt(2f)+.004f;else -> .305f }
-                val sides=if(style==CityBuildingStyle.DOME)12 else 4
-                prism(buildings,cx+(if(style==CityBuildingStyle.TERRACE)index/floors.size.toFloat()*.045f else 0f),cy,z1-.004f,z1,radius,radius,sides,lerp(color,Color.Black,.12f),day)
-            }
-        }
-        when(style) {
-            CityBuildingStyle.TREE -> Unit
-            CityBuildingStyle.HOUSE -> {
-                val a=ScenePoint(cx-.25f,cy-.25f,top);val b=ScenePoint(cx+.25f,cy-.25f,top)
-                val c=ScenePoint(cx+.25f,cy+.25f,top);val d=ScenePoint(cx-.25f,cy+.25f,top)
-                val e=ScenePoint(cx,cy-.25f,top+.22f);val f=ScenePoint(cx,cy+.25f,top+.22f)
-                quad(buildings,listOf(a,d,f,e),roof,day);quad(buildings,listOf(e,f,c,b),lerp(roof,Color.White,.18f),day)
-                quad(buildings,listOf(a,b,e),roof,day);quad(buildings,listOf(d,c,f),roof,day)
-            }
-            CityBuildingStyle.PAVILION -> {
-                prism(buildings,cx,cy,top,top+.11f,.36f,.16f,4,roof,day)
-                prism(buildings,cx,cy,top+.10f,top+.21f,.22f,0f,4,roof,day)
-            }
-            CityBuildingStyle.TERRACE -> {
-                block(buildings,cx+.045f,cy,top,top+.05f,.19f,roof,day)
-                block(buildings,cx+.09f,cy-.04f,top+.05f,top+.15f,.055f,stone,day)
-            }
-            CityBuildingStyle.DOME -> {
-                repeat(6) { ring ->
-                    val t0=ring/6f;val t1=(ring+1)/6f
-                    prism(buildings,cx,cy,top+t0*.23f,top+t1*.23f,.28f*sqrt(1-t0*t0),.28f*sqrt(1-t1*t1),12,roof,day)
-                }
-            }
-            CityBuildingStyle.PAGODA -> {
-                prism(buildings,cx,cy,top,top+.18f,.25f,.02f,6,roof,day)
-                prism(buildings,cx,cy,top+.18f,top+.30f,.025f,0f,6,stone,day)
-            }
-            CityBuildingStyle.PEARL -> {
-                prism(buildings,cx,cy,top,top+.12f,.09f,.025f,12,roof,day)
-                prism(buildings,cx,cy,top+.12f,top+.34f,.025f,0f,6,stone,day)
             }
         }
     }
     return CityScene(ground,buildings)
+}
+
+/** Normalized height/radius pairs; all ornaments are contained in 0..1. */
+private fun buildingProfile(style: CityBuildingStyle): List<Pair<Float, Float>> = when (style) {
+    CityBuildingStyle.TREE -> listOf(0f to .022f, .1f to .022f, .1f to .16f,
+        .55f to .07f, .55f to .12f, 1f to 0f)
+    CityBuildingStyle.HOUSE -> listOf(0f to .30f, .70f to .30f, .70f to .36f, 1f to 0f)
+    CityBuildingStyle.PAVILION -> listOf(0f to .28f, .65f to .28f, .65f to .36f,
+        .83f to .15f, .83f to .23f, 1f to 0f)
+    CityBuildingStyle.TERRACE -> listOf(0f to .34f, .45f to .34f, .45f to .27f,
+        .78f to .27f, .78f to .19f, 1f to .19f)
+    CityBuildingStyle.DOME -> listOf(0f to .25f, .72f to .25f) + (0..8).map { ring ->
+        val t = ring / 8f
+        (.72f + .28f * t) to (.25f * sqrt(1f - t * t))
+    }
+    CityBuildingStyle.PAGODA -> buildList {
+        for (tier in 0..4) {
+            val t = tier * .17f
+            val radius = .28f - tier * .025f
+            add(t to radius * .75f)
+            add(t + .13f to radius * .75f)
+            add(t + .13f to radius)
+            add(t + .17f to radius * .65f)
+        }
+        add(.85f to .17f); add(.95f to .02f); add(1f to 0f)
+    }
+    CityBuildingStyle.PEARL -> (0..40).map { ring ->
+        val t = ring / 40f
+        val radius = if (t <= .88f) .055f + .21f * max(
+            exp(-((t - .28f) / .15f).pow(2)), exp(-((t - .72f) / .11f).pow(2)))
+        else .055f * (1f - t) / .12f
+        t to radius
+    }
 }

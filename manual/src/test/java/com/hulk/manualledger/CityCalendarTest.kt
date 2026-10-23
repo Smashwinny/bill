@@ -25,17 +25,55 @@ class CityCalendarTest {
         assertEquals(50200L,result.getValue(29).sumOf { it.amountCents })
         assertEquals(result,CityCalendarModel.floors(listOf(a,b,c).reversed(),month,{"当前分类 › ${it.category}"},zone))
     }
-    @Test fun skylineUsesCountTiersAndStableDateVariants() {
-        assertEquals(CityBuildingStyle.TREE,CityCalendarModel.style(1,2))
-        assertEquals(CityBuildingStyle.PAVILION,CityCalendarModel.style(1,3))
-        assertEquals(CityBuildingStyle.HOUSE,CityCalendarModel.style(2,4))
-        assertEquals(CityBuildingStyle.DOME,CityCalendarModel.style(1,5))
-        assertEquals(CityBuildingStyle.TERRACE,CityCalendarModel.style(2,7))
-        assertEquals(CityBuildingStyle.PAGODA,CityCalendarModel.style(1,8))
-        assertEquals(CityBuildingStyle.PAGODA,CityCalendarModel.style(2,11))
-        assertEquals(CityBuildingStyle.PEARL,CityCalendarModel.style(1,12))
-        assertTrue(CityCalendarModel.top(20,20)>CityCalendarModel.top(2,20))
-        assertEquals(2.58f,CityCalendarModel.top(500,500),.001f)
+    @Test fun skylineUsesMonetaryHeightAndStableDateVariants() {
+        assertEquals(CityBuildingStyle.TREE,CityCalendarModel.style(1,.2f))
+        assertEquals(CityBuildingStyle.PAVILION,CityCalendarModel.style(1,.6f))
+        assertEquals(CityBuildingStyle.HOUSE,CityCalendarModel.style(2,.6f))
+        assertEquals(CityBuildingStyle.DOME,CityCalendarModel.style(1,1f))
+        assertEquals(CityBuildingStyle.TERRACE,CityCalendarModel.style(2,1f))
+        assertEquals(CityBuildingStyle.PAGODA,CityCalendarModel.style(1,1.6f))
+        assertEquals(CityBuildingStyle.PEARL,CityCalendarModel.style(1,2.5f))
+    }
+
+    @Test fun amountRatiosHoldForFloorsAndWholeBuildingsIncludingRoofs() {
+        val days = mapOf(1 to listOf(CityFloor("a","饮食",100), CityFloor("b","交通",300)),
+            2 to listOf(CityFloor("c","饮食",800)),
+            3 to (1..8).map { CityFloor("d$it","购物",100) })
+        val maximum = days.values.maxOf(CityCalendarModel::total)
+        val layers = CityCalendarModel.layers(days.getValue(1), maximum)
+        assertEquals(3f, (layers[1].top-layers[1].bottom)/(layers[0].top-layers[0].bottom), .00001f)
+        val other = CityCalendarModel.layers(days.getValue(3), maximum)
+        assertEquals(layers[0].top, other[0].top, .00001f)
+        val scene = buildCityScene(month, days, null)
+        fun height(day: Int) = scene.buildings.filter { it.day == day }.flatMap { it.corners }.maxOf { it.z } - CityCalendarModel.GROUND_Z
+        assertEquals(2f, height(2)/height(1), .00001f)
+        assertEquals(height(2), height(3), .00001f)
+        assertEquals(CityCalendarModel.MAX_HEIGHT, height(2), .00001f)
+        for (day in 1..3) {
+            val points = scene.buildings.filter { it.day == day }.flatMap { it.corners }
+            CityCalendarModel.layers(days.getValue(day), maximum).forEach { layer ->
+                assertTrue(points.any { kotlin.math.abs(it.z - CityCalendarModel.GROUND_Z - layer.bottom) < .00001f })
+                assertTrue(points.any { kotlin.math.abs(it.z - CityCalendarModel.GROUND_Z - layer.top) < .00001f })
+            }
+        }
+    }
+
+    @Test fun datesStayAtTheBottomRightOfEveryCalendarTile() {
+        for (day in 1..month.lengthOfMonth()) {
+            val center = CalendarProjection.dayCenter(month, day)
+            val marker = CityCalendarModel.marker(month, day)
+            assertEquals(center.x + .24f, marker.x, .00001f)
+            assertEquals(center.y + .25f, marker.y, .00001f)
+            assertEquals(.025f, marker.z, .00001f)
+        }
+    }
+
+    @Test fun tinyAmountsAreNotInflatedAndEmptyScaleIsFinite() {
+        val floors = listOf(CityFloor("tiny", "饮食", 1), CityFloor("large", "交通", 999999))
+        val layers = CityCalendarModel.layers(floors, 1000000.0)
+        assertEquals(.0000025f, layers[0].top, .00000001f)
+        assertEquals(2.5f, layers[1].top, .00001f)
+        assertEquals(0f, CityCalendarModel.height(0.0, 0.0), 0f)
     }
     @Test fun sceneHandlesSparseLeapMonthAndDenseDayWithFiniteGeometryAndDatePicking() {
         val sparse=mapOf(29 to listOf(CityFloor("a","饮食",100)))
@@ -53,9 +91,11 @@ class CityCalendarTest {
     @Test fun emptyDaysHaveNoDecorativeBuildingsAndTreesHaveNoExtraPlatformOrRoof() {
         assertTrue(buildCityScene(month, emptyMap(), null).buildings.isEmpty())
         val floors = listOf(CityFloor("a", "饮食", 100), CityFloor("b", "交通", 200))
-        val scene = buildCityScene(month, mapOf(29 to floors), null)
-        assertEquals(setOf(29), scene.buildings.mapNotNull { it.day }.toSet())
-        assertEquals(CityBuildingStyle.TREE, CityCalendarModel.style(29, floors.size))
-        assertEquals(CityCalendarModel.top(2, 2), scene.buildings.flatMap { it.corners }.maxOf { it.z }, .0001f)
+        val days = mapOf(29 to floors, 1 to listOf(CityFloor("large", "购物", 10000)))
+        val scene = buildCityScene(month, days, null)
+        val height = CityCalendarModel.height(300.0, 10000.0)
+        assertEquals(CityBuildingStyle.TREE, CityCalendarModel.style(29, height))
+        assertEquals(CityCalendarModel.GROUND_Z + height,
+            scene.buildings.filter { it.day == 29 }.flatMap { it.corners }.maxOf { it.z }, .0001f)
     }
 }

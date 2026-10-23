@@ -76,7 +76,6 @@ internal fun CalendarSandtable(month: YearMonth, days: Map<Int, List<CityFloor>>
     val latestOnDay by rememberUpdatedState(onDay)
     val today = LocalDate.now().takeIf { YearMonth.from(it) == month }?.dayOfMonth
     val scene = remember(month, days, today, selectedDay) { buildCityScene(month, days, selectedDay ?: today) }
-    val maxCount = days.values.maxOfOrNull { it.size } ?: 1
     val primary = MaterialTheme.colorScheme.primary
     val weeks = (month.atDay(1).dayOfWeek.value - 1 + month.lengthOfMonth() + 6) / 7
     Box {
@@ -84,7 +83,7 @@ internal fun CalendarSandtable(month: YearMonth, days: Map<Int, List<CityFloor>>
             .background(Brush.verticalGradient(listOf(Color(0xFFF5F7F1), Color(0xFFE1E9DE))))
             .testTag("calendar-sandtable")
             .semantics {
-                contentDescription = "$month 消费小城，一天一栋，彩色一层一笔支出"
+                contentDescription = "$month 消费日历"
                 stateDescription = "旋转 ${yaw.toInt()} 度，俯角 ${pitch.toInt()} 度"
                 customActions = (1..month.lengthOfMonth()).map { day ->
                     val records = days[day].orEmpty()
@@ -117,40 +116,32 @@ internal fun CalendarSandtable(month: YearMonth, days: Map<Int, List<CityFloor>>
             }
             val ground = scene.ground.map(::project)
             val buildings = scene.buildings.map(::project).sortedBy { it.third }
-            val painted = ground + buildings
-            painted.forEach { (face,points) ->
-                drawPath(path(points),face.color)
-
-            }
-            val hits = painted.mapNotNull { (face,points) -> face.day?.let { points to it } }.toMutableList()
+            ground.forEach { (face, points) -> drawPath(path(points), face.color) }
             val labels = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                textSize=9.sp.toPx();color=Color(0xFF364D46).toArgb();isFakeBoldText=true;textAlign=Paint.Align.CENTER
+                textSize = 78f; isFakeBoldText = true; textAlign = Paint.Align.CENTER
             }
-            // Screen-facing date plaques stay legible at any angle and use the same hit area.
-            val occupiedLabels = mutableListOf<android.graphics.RectF>()
-            val markers = (1..month.lengthOfMonth()).map { day ->
-                day to camera.project(CityCalendarModel.marker(month, day, days[day].orEmpty().size, maxCount))
-            }.sortedByDescending { it.second.depth }
-            markers.forEach { (day, p) ->
-                val count = days[day].orEmpty().size
-                val w=labels.measureText(day.toString())+5.dp.toPx();val h=12.dp.toPx()
-                val rect=android.graphics.RectF(p.x-w/2,p.y-h/2,p.x+w/2,p.y+h/2)
-                // Do not put a date badge on a nearer building belonging to a different day.
-                val occluder = buildings.lastOrNull { (face, points, depth) ->
-                    face.day != day && depth > p.depth && CalendarProjection.contains(points,p.x,p.y)
+            // Date text is printed on the tile plane and rotates with it, below the buildings.
+            (1..month.lengthOfMonth()).forEach { day ->
+                val anchor = CityCalendarModel.marker(month, day)
+                val corners = listOf(
+                    anchor.copy(x = anchor.x - .14f, y = anchor.y - .12f),
+                    anchor.copy(x = anchor.x + .14f, y = anchor.y - .12f),
+                    anchor.copy(x = anchor.x + .14f, y = anchor.y + .12f),
+                    anchor.copy(x = anchor.x - .14f, y = anchor.y + .12f)
+                ).map(camera::project)
+                val matrix = android.graphics.Matrix()
+                matrix.setPolyToPoly(floatArrayOf(0f, 0f, 100f, 0f, 100f, 100f, 0f, 100f), 0,
+                    corners.flatMap { listOf(it.x, it.y) }.toFloatArray(), 0, 4)
+                labels.color = (if (day == (selectedDay ?: today)) primary else Color(0xFF364D46)).toArgb()
+                drawContext.canvas.nativeCanvas.apply {
+                    save(); concat(matrix)
+                    drawText(day.toString(), 50f, 50f - (labels.ascent() + labels.descent()) / 2, labels)
+                    restore()
                 }
-                if (occluder != null) return@forEach
-                val clearance = android.graphics.RectF(rect).apply { inset(-1.dp.toPx(), -1.dp.toPx()) }
-                if (occupiedLabels.any { android.graphics.RectF.intersects(it, clearance) }) return@forEach
-                occupiedLabels += clearance
-                val ink=Paint(Paint.ANTI_ALIAS_FLAG).apply { color=(if(day==(selectedDay ?: today)) primary else Color(0xFFFFFEF7).copy(alpha=.94f)).toArgb() }
-                if (count > 0) drawLine(Color(0xFFFFFEF7),Offset(p.x,rect.bottom),Offset(p.x,rect.bottom+3.dp.toPx()),strokeWidth=1.dp.toPx())
-                drawContext.canvas.nativeCanvas.drawRoundRect(rect,3.dp.toPx(),3.dp.toPx(),ink)
-                labels.color=(if(day==(selectedDay ?: today)) Color.White else Color(0xFF364D46)).toArgb()
-                drawContext.canvas.nativeCanvas.drawText(day.toString(),p.x,p.y-(labels.ascent()+labels.descent())/2,labels)
-                hits += listOf(ProjectedPoint(rect.left,rect.top,p.depth),ProjectedPoint(rect.right,rect.top,p.depth),
-                    ProjectedPoint(rect.right,rect.bottom,p.depth),ProjectedPoint(rect.left,rect.bottom,p.depth)) to day
             }
+            buildings.forEach { (face, points) -> drawPath(path(points), face.color) }
+            val hits = (ground + buildings).mapNotNull { (face, points) -> face.day?.let { points to it } }
+            labels.textSize = 9.sp.toPx()
             labels.color=Color(0xFF52685F).toArgb()
             listOf("一","二","三","四","五","六","日").forEachIndexed { i,text ->
                 val p=camera.project(ScenePoint(i-3f,-weeks/2f-.30f))
